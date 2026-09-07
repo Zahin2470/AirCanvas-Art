@@ -62,6 +62,28 @@ class AppConfig:
     min_tracking_confidence: float = 0.5
     hand_model_path: Optional[Path] = None  # None => auto-download/cache
 
+    # -- Virtual canvas (target space the fingertip maps onto; the
+    #    real drawable canvas widget arrives in Phase 3) --
+    canvas_pixel_width: int = 1600
+    canvas_pixel_height: int = 900
+
+    # -- Pointer smoothing (see vision/smoothing.py) --
+    smoothing_min_alpha: float = 0.15
+    smoothing_max_alpha: float = 0.9
+    smoothing_velocity_lower: float = 0.0
+    smoothing_velocity_upper: float = 2.0
+    smoothing_min_movement_threshold: float = 0.0025
+
+    # -- Coordinate mapping (see vision/calibration.py) --
+    canvas_margin: float = 0.08  # symmetric default; calibration overrides per-side
+    pointer_sensitivity: float = 1.0
+
+    # -- Gesture / intent state machine (see interaction/state_machine.py) --
+    pinch_threshold: float = 0.35
+    gesture_debounce_frames: int = 3
+    hand_lost_grace_frames: int = 10
+    fist_confirm_frames: int = 20
+
     # -- App --
     debug: bool = False
 
