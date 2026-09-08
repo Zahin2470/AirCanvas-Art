@@ -3,36 +3,36 @@
 A touchless painting studio: move your index fingertip through the air in
 front of your webcam and paint onto a virtual canvas.
 
-**Status: Phase 2 of 8** — pointer mapping, smoothing, gesture
-classification, a debounced intent state machine, and manual
-calibration, on top of Phase 1's camera/tracker skeleton. There is
-still no paintable canvas yet (that's Phase 3); this phase's
-deliverable is a debug preview that proves the *interaction* pipeline
-(raw fingertip → smoothed cursor → gesture → drawing/erasing/UI
-intent) works end to end.
+**Status: Phase 3 of 8** — a real pygame drawing canvas, stroke-based
+brush engine, eraser, and stroke-level undo/redo, on top of Phases 1-2's
+tracking and interaction pipeline. The temporary OpenCV debug window is
+gone — this is a real (if not yet visually polished) paint app: raise
+your hand, pinch to draw, two-finger to erase, hold a fist to clear.
 
 ## What's here right now
 
 - `main.py` — CLI entry point
 - `aircanvas/config.py` — runtime configuration (camera, tracking, smoothing,
-  mapping, gesture/state-machine settings)
-- `aircanvas/vision/camera.py` — webcam capture, with graceful error handling
-- `aircanvas/vision/tracker.py` — MediaPipe hand-landmark tracking
-- `aircanvas/vision/features.py` — derived per-hand signals (fingertip,
-  pinch distance, which fingers are extended)
-- `aircanvas/vision/gestures.py` — per-frame gesture classification
-  (pointing, pinch, two-finger, open palm, fist)
-- `aircanvas/vision/smoothing.py` — velocity-adaptive pointer smoothing
-- `aircanvas/vision/calibration.py` — camera-space → canvas-space
-  coordinate mapping, plus two-point calibration
-- `aircanvas/interaction/state_machine.py` — debounced intent state
-  machine (hysteresis, hand-lost grace period, fist-hold-to-clear)
-- `aircanvas/interaction/intent.py` — ties the above into one
-  per-frame `FrameIntent` for the future canvas/rendering layers
-- `aircanvas/app.py` — wires everything into a debug preview window
-- `aircanvas/{canvas,rendering,audio,persistence,ui}/` — empty
-  scaffolding for later phases (see Roadmap below)
-- `aircanvas/tests/` — 80 unit tests, all hardware/network-free
+  mapping, gesture/state-machine, brush/palette settings)
+- `aircanvas/vision/` — camera, MediaPipe tracker, features, gestures,
+  smoothing, calibration (unchanged since Phase 2)
+- `aircanvas/interaction/state_machine.py` — debounced intent state machine
+- `aircanvas/interaction/intent.py` — per-frame `FrameIntent`, now also
+  tracking erase start/end alongside stroke start/end
+- `aircanvas/interaction/dev_input.py` — developer mouse/keyboard input
+  source (see Developer Mode below)
+- `aircanvas/canvas/stroke.py` — the `Stroke` data model
+- `aircanvas/canvas/brushes.py` — brush type catalog (one real brush so far)
+- `aircanvas/canvas/brush_engine.py` — stamps strokes onto a pygame surface,
+  incrementally while drawing and fully on undo/redo/clear
+- `aircanvas/canvas/eraser.py` — eraser stroke factory + stamp geometry helper
+- `aircanvas/canvas/history.py` — generic undo/redo action stack
+- `aircanvas/canvas/model.py` — the canvas document (strokes + undo/redo)
+- `aircanvas/app.py` — the real pygame app: canvas panel, camera preview
+  panel, status bar, and the main loop wiring everything together
+- `aircanvas/{rendering,audio,persistence,ui}/` — empty scaffolding for
+  later phases (see Roadmap below)
+- `aircanvas/tests/` — 127 unit tests, all hardware/network-free
 
 ## A note on MediaPipe versions
 
@@ -61,32 +61,47 @@ python main.py --camera 1      # use a different camera index
 python main.py --debug         # verbose logging
 ```
 
-A window opens showing your webcam feed with your hand skeleton, a raw
-fingertip marker (thin red ring), a smoothed cursor (colored ring, color
-matches the current intent state), and status text: current state/gesture,
-velocity, and the mapped canvas-cursor coordinates.
+A window opens with two panels: your webcam feed (with hand skeleton and
+intent overlay) on the left, and the actual art canvas on the right. Raise
+your hand and start painting.
 
 **Gestures** (see `aircanvas/vision/gestures.py`):
 | Gesture | Pose | Effect |
 |---|---|---|
 | Pointing | index finger only | move the cursor (no drawing) |
-| Pinch | thumb + index together | draw (`DRAWING` state) |
-| Two-finger | index + middle | erase (`ERASING` state) |
+| Pinch | thumb + index together | draw with the current color/size |
+| Two-finger | index + middle | erase (same size as the current brush) |
 | Open palm | most/all fingers extended | pause / UI mode |
-| Fist | no fingers extended | hold ~2/3 of a second to arm a clear (shown as a hold-progress percentage); release early to cancel |
+| Fist | no fingers extended | hold ~2/3 of a second to clear the canvas |
 
-**Controls:**
+**Keyboard controls** (temporary dev tools — Phase 4 replaces the
+brush/color/calibration ones with touchless equivalents):
 - **Q** / **Esc** — quit
-- **1** — capture the top-left corner for calibration (point there and press 1)
-- **2** — capture the bottom-right corner for calibration
-- **C** — reset calibration back to the default margins
+- **Z** — undo · **X** — redo
+- **[** / **]** — smaller / larger brush (5 presets)
+- **Tab** — cycle the color palette
+- **1** — capture the top-left calibration corner · **2** — bottom-right · **C** — reset calibration
 
-Calibration here is a temporary keyboard-driven dev tool — Phase 4's
-touchless UI replaces it with a fully hands-only flow.
+If the camera fails to open, AirCanvas prints a clear message and
+**automatically falls back to developer mouse mode** rather than crashing.
 
-If the camera fails to open, AirCanvas prints a clear error instead of
-crashing — try a different `--camera` index or check that no other app is
-using the webcam.
+### Developer mode (no camera needed)
+
+```bash
+python main.py --mouse
+```
+
+Lets you test the entire app — drawing, erasing, undo/redo, clearing —
+with just a mouse and keyboard, no webcam required:
+
+- **Left mouse button held** — draw
+- **Right mouse button held** — erase
+- **F key held** — hold to clear (same confirmation delay as a fist)
+
+This reuses the exact same `IntentStateMachine` and brush/canvas code a
+real hand does — it's a stand-in for the *input*, not a separate code
+path for drawing. Per the project spec, this is for testing only and is
+never required for normal use.
 
 ## Running tests
 
@@ -97,9 +112,11 @@ pytest aircanvas/tests -v
 
 Tests are hardware-free: the camera tests mock `cv2.VideoCapture`, the
 tracker tests exercise data structures and model-caching logic without
-loading a real model, and the feature/gesture/smoothing/calibration/state-
-machine/intent tests all run against synthetic landmark data
-(`aircanvas/tests/helpers.py`) rather than a live camera or hand.
+loading a real model, the feature/gesture/smoothing/calibration/state-
+machine/intent/dev-input tests run against synthetic data
+(`aircanvas/tests/helpers.py`), and the canvas tests (`stroke`, `history`,
+`model`, `eraser`, `brush_engine`) run against a real but headless pygame
+`Surface` — no window or display needed.
 
 ## Roadmap
 
@@ -107,6 +124,7 @@ machine/intent tests all run against synthetic landmark data
 |---|---|
 | 1 ✅ | Skeleton, config, camera, tracker, tests |
 | 2 ✅ | Pointer mapping, smoothing, gesture state machine, calibration |
+| 3 ✅ | Canvas model, stroke representation, basic brush, undo/redo |
 | 3 | Canvas model, stroke representation, basic brush, undo/redo |
 | 4 | Touchless tool/color/size controls |
 | 5 | Advanced brushes, particles, Living Ink, animation polish |

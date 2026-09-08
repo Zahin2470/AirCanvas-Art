@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 APP_NAME = "AirCanvas"
 APP_VERSION = "0.1.0"  # Phase 1: skeleton, config, camera, tracker, tests
@@ -66,6 +66,22 @@ class AppConfig:
     #    real drawable canvas widget arrives in Phase 3) --
     canvas_pixel_width: int = 1600
     canvas_pixel_height: int = 900
+    canvas_background_color: Tuple[int, int, int] = (18, 18, 24)
+
+    # -- Brush defaults (see canvas/brush_engine.py, canvas/brushes.py) --
+    # "Support at least five sizes" -- diameters in canvas pixels.
+    brush_sizes: Tuple[int, ...] = (4, 8, 14, 22, 34)
+    default_brush_size_index: int = 2
+    # A short curated starting palette; full color-wheel/picker UI is Phase 4.
+    brush_palette: Tuple[Tuple[int, int, int], ...] = (
+        (240, 240, 245),  # off-white ink
+        (255, 87, 87),    # coral red
+        (255, 196, 61),   # amber
+        (94, 214, 148),   # mint green
+        (94, 156, 255),   # sky blue
+        (198, 120, 255),  # violet
+    )
+    default_palette_index: int = 0
 
     # -- Pointer smoothing (see vision/smoothing.py) --
     smoothing_min_alpha: float = 0.15

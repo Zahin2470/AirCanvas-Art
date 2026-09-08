@@ -2,10 +2,11 @@
 """
 AirCanvas entry point.
 
-Phase 1 usage:
+Usage:
     python main.py                  # run with the default camera
     python main.py --camera 1       # use a specific camera index
     python main.py --debug          # verbose logging
+    python main.py --mouse          # developer mode: mouse + keyboard, no camera
 
 Flags like `--open artwork.aircanvas` (from the full project CLI)
 arrive once save/load exists in a later phase.
@@ -25,6 +26,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aircanvas", description=f"{APP_NAME} {APP_VERSION}")
     parser.add_argument("--camera", type=int, default=None, help="Camera index to use (default: 0)")
     parser.add_argument("--debug", action="store_true", help="Verbose logging and diagnostics")
+    parser.add_argument(
+        "--mouse", action="store_true",
+        help="Developer mode: simulate the fingertip with the mouse (left=draw, right=erase, F=hold to clear). "
+             "Testing only -- never required for normal use.",
+    )
     return parser
 
 
@@ -37,7 +43,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         overrides["camera_index"] = args.camera
     config = load_config(overrides)
 
-    return app.run(config)
+    return app.run(config, mouse_mode=args.mouse)
 
 
 if __name__ == "__main__":

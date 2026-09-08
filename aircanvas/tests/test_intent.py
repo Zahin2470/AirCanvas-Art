@@ -65,6 +65,26 @@ def test_two_finger_hand_reports_erasing_not_drawing():
     result = resolver.update([hand], now=0.0)
     assert result.is_erasing is True
     assert result.is_drawing is False
+    assert result.erase_started is True
+
+
+def test_holding_two_finger_across_frames_does_not_re_fire_erase_started():
+    resolver = _resolver()
+    hand = make_hand(extended={"index": True, "middle": True})
+    resolver.update([hand], now=0.0)
+    result = resolver.update([hand], now=1 / 30)
+    assert result.is_erasing is True
+    assert result.erase_started is False
+
+
+def test_releasing_two_finger_ends_the_erase():
+    resolver = _resolver()
+    two_finger_hand = make_hand(extended={"index": True, "middle": True})
+    point_hand = make_hand(extended={"index": True})
+    resolver.update([two_finger_hand], now=0.0)
+    result = resolver.update([point_hand], now=1 / 30)
+    assert result.is_erasing is False
+    assert result.erase_ended is True
 
 
 def test_cursor_position_reflects_coordinate_mapping():

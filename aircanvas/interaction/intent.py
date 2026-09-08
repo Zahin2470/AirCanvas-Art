@@ -40,6 +40,8 @@ class FrameIntent:
     is_erasing: bool
     stroke_started: bool
     stroke_ended: bool
+    erase_started: bool
+    erase_ended: bool
     clear_confirmed: bool
     clear_progress: float
 
@@ -60,6 +62,7 @@ class IntentResolver:
         self._pinch_threshold = pinch_threshold
         self._last_time: Optional[float] = None
         self._was_drawing = False
+        self._was_erasing = False
 
     def resize_canvas(self, width: int, height: int) -> None:
         self._mapper.resize(width, height)
@@ -78,6 +81,7 @@ class IntentResolver:
         self._state_machine.reset()
         self._last_time = None
         self._was_drawing = False
+        self._was_erasing = False
 
     def update(self, hands: List[HandResult], now: Optional[float] = None) -> FrameIntent:
         now = now if now is not None else time.monotonic()
@@ -87,6 +91,7 @@ class IntentResolver:
         if not hands:
             update = self._state_machine.step(None)
             self._was_drawing = False
+            self._was_erasing = False
             return FrameIntent(
                 state=update.state,
                 gesture=None,
@@ -98,6 +103,8 @@ class IntentResolver:
                 is_erasing=False,
                 stroke_started=False,
                 stroke_ended=False,
+                erase_started=False,
+                erase_ended=False,
                 clear_confirmed=update.clear_confirmed,
                 clear_progress=update.clear_progress,
             )
@@ -114,7 +121,10 @@ class IntentResolver:
         is_erasing = update.state == IntentState.ERASING
         stroke_started = is_drawing and not self._was_drawing
         stroke_ended = self._was_drawing and not is_drawing
+        erase_started = is_erasing and not self._was_erasing
+        erase_ended = self._was_erasing and not is_erasing
         self._was_drawing = is_drawing
+        self._was_erasing = is_erasing
 
         return FrameIntent(
             state=update.state,
@@ -127,6 +137,8 @@ class IntentResolver:
             is_erasing=is_erasing,
             stroke_started=stroke_started,
             stroke_ended=stroke_ended,
+            erase_started=erase_started,
+            erase_ended=erase_ended,
             clear_confirmed=update.clear_confirmed,
             clear_progress=update.clear_progress,
         )
