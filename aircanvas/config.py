@@ -82,6 +82,14 @@ class AppConfig:
         (198, 120, 255),  # violet
     )
     default_palette_index: int = 0
+    default_brush_type_index: int = 0  # index into canvas.brushes.SELECTABLE_BRUSHES
+
+    # -- Living Ink / particles (see rendering/particles.py, rendering/effects.py) --
+    particles_enabled: bool = True
+    max_particles: int = 220
+    living_ink_base_rate: float = 12.0
+    living_ink_velocity_scale: float = 6.0
+    living_ink_idle_rate: float = 2.0
 
     # -- Pointer smoothing (see vision/smoothing.py) --
     smoothing_min_alpha: float = 0.15

@@ -1,11 +1,10 @@
 """
 Brush type catalog.
 
-Phase 3 implements one real brush end to end (SMOOTH_INK) plus the
-eraser. The remaining styles are defined here now so the Stroke and
-future serialization format are stable, but they currently render
-identically to Smooth Ink -- Phase 5 gives each its own distinct
-visual character (particles, glow, rainbow gradient, sparks).
+Phase 5 gives every type its own distinct visual character in
+canvas/brush_engine.py (Smooth Ink, Neon Glow, Soft Marker, Particle,
+Rainbow Flow, Spark), plus the Eraser's background-color reuse of the
+Smooth Ink shape.
 """
 from __future__ import annotations
 
@@ -25,7 +24,9 @@ class BrushType(Enum):
     ERASER = "eraser"
 
 
-# Styles brush_engine currently renders with their own logic. Anything
-# not in this set falls back to the Smooth Ink stamp-based renderer
-# until Phase 5.
-IMPLEMENTED_BRUSHES = frozenset({BrushType.SMOOTH_INK, BrushType.ERASER})
+# Brush types selectable from the toolbar (everything except the
+# eraser, which is triggered by the two-finger gesture instead).
+SELECTABLE_BRUSHES = tuple(b for b in BrushType if b != BrushType.ERASER)
+
+# Every brush type now has its own renderer in brush_engine.py.
+IMPLEMENTED_BRUSHES = frozenset(BrushType)
