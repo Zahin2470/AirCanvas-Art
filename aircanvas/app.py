@@ -1,28 +1,24 @@
 """
-Phase 3 application shell.
+Phase 4 application shell.
 
-This is where the real drawing canvas takes over as a pygame window,
-replacing the temporary OpenCV debug preview from Phases 1-2. Layout:
-a webcam preview panel (hand skeleton + intent overlay, baked in with
-the same OpenCV drawing helpers as before) alongside the actual art
-canvas, plus a thin status bar.
+Adds touchless tool/color/size controls on top of Phase 3's canvas:
+a toolbar of color swatches, brush-size presets, and undo/redo
+buttons, selected by pointing (hover) and holding a pinch (dwell) --
+see aircanvas/ui/toolbar.py.
 
-The interaction pipeline itself (camera -> tracker -> IntentResolver)
-is unchanged from Phase 2; this phase's new work is wiring its output
-into aircanvas.canvas: starting/extending/ending strokes through
-BrushEngine, and recording them in CanvasModel for undo/redo.
+The one structural change this required: IntentResolver's coordinate
+mapper now targets the *whole window*, not just the canvas panel, so
+the tracked fingertip can reach the toolbar as well as the canvas.
+Drawing only happens when the cursor is actually over the canvas
+panel; hovering the toolbar routes pinches to widget activation
+instead of starting a stroke (see _route_intent).
 
-Touchless color/size/tool controls are Phase 4 -- for now, palette
-and size are cycled with the keyboard, same temporary-dev-tool
-pattern as Phase 2's calibration keys.
-
-Developer mode (--mouse, or an automatic fallback if the camera can't
-open) drives the exact same brush/canvas code through
-interaction.dev_input.DevIntentSource instead of a real hand, so the
-whole app is testable without a webcam.
+Touchless calibration is still Phase-4-shaped future work -- corner
+capture is keyboard-driven for now, same as Phase 2/3.
 """
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import List, Optional, Tuple
 
@@ -37,6 +33,7 @@ from aircanvas.config import AppConfig
 from aircanvas.interaction.dev_input import DevIntentSource
 from aircanvas.interaction.intent import FrameIntent, IntentResolver
 from aircanvas.interaction.state_machine import IntentState, StateMachineConfig
+from aircanvas.ui.toolbar import Toolbar, ToolbarResult, Widget
 from aircanvas.vision.calibration import Calibrator, MapperConfig
 from aircanvas.vision.camera import Camera, CameraError
 from aircanvas.vision.smoothing import SmoothingConfig
@@ -44,12 +41,23 @@ from aircanvas.vision.tracker import HAND_CONNECTIONS, HandResult, HandTracker, 
 
 logger = logging.getLogger("aircanvas.app")
 
-WINDOW_TITLE = "AirCanvas — Phase 3"
-PREVIEW_PANEL_WIDTH = 320
+WINDOW_TITLE = "AirCanvas — Phase 4"
+PREVIEW_PANEL_WIDTH = 260
+TOOLBAR_WIDTH = 176
 MARGIN = 14
+PADDING = 10
 STATUS_BAR_HEIGHT = 30
 PANEL_BG = (10, 10, 13)
+TOOLBAR_BG = (22, 22, 27)
 STATUS_TEXT_COLOR = (200, 200, 205)
+
+SWATCH_SIZE = 40
+SWATCH_GAP = 8
+SWATCH_COLUMNS = 3
+SIZE_BTN_SIZE = 26
+SIZE_BTN_GAP = 6
+UNDO_REDO_HEIGHT = 34
+SECTION_GAP = 16
 
 _STATE_COLORS = {
     IntentState.IDLE: (110, 110, 110),
@@ -62,142 +70,74 @@ _STATE_COLORS = {
 }
 
 
-def _build_resolver(config: AppConfig) -> IntentResolver:
-    smoothing_config = SmoothingConfig(
-        min_alpha=config.smoothing_min_alpha,
-        max_alpha=config.smoothing_max_alpha,
-        velocity_lower=config.smoothing_velocity_lower,
-        velocity_upper=config.smoothing_velocity_upper,
-        min_movement_threshold=config.smoothing_min_movement_threshold,
-    )
-    mapper_config = MapperConfig(
-        margin_left=config.canvas_margin,
-        margin_right=config.canvas_margin,
-        margin_top=config.canvas_margin,
-        margin_bottom=config.canvas_margin,
-        sensitivity=config.pointer_sensitivity,
-    )
-    state_config = StateMachineConfig(
-        debounce_frames=config.gesture_debounce_frames,
-        hand_lost_grace_frames=config.hand_lost_grace_frames,
-        fist_confirm_frames=config.fist_confirm_frames,
-    )
-    return IntentResolver(
-        canvas_width=config.canvas_pixel_width,
-        canvas_height=config.canvas_pixel_height,
-        smoothing_config=smoothing_config,
-        mapper_config=mapper_config,
-        state_config=state_config,
-        pinch_threshold=config.pinch_threshold,
-    )
+# -- Layout -----------------------------------------------------------------
 
-
-def _frame_to_surface(frame_bgr: np.ndarray) -> "pygame.Surface":
-    """Convert an OpenCV BGR frame into a pygame Surface for blitting."""
-    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    # pygame expects a (width, height, 3) array; OpenCV gives (height, width, 3).
-    return pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
-
-
-def _draw_camera_overlay(frame: np.ndarray, hands, intent: FrameIntent, calibrator: Calibrator) -> None:
-    """Bake the hand skeleton + intent readout onto the raw camera
-    frame with OpenCV, reusing the same drawing primitives as the
-    Phase 1/2 debug preview, before it's converted to a pygame Surface
-    for the preview panel. Cheaper than reimplementing this in pygame."""
-    height, width = frame.shape[:2]
-    for hand in hands:
-        points = hand.pixel_landmarks(width, height)
-        for start, end in HAND_CONNECTIONS:
-            cv2.line(frame, points[start], points[end], (0, 220, 255), 2, cv2.LINE_AA)
-        for x, y in points:
-            cv2.circle(frame, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)
-
-    color = _STATE_COLORS.get(intent.state, (255, 255, 255))
-    if intent.raw_pos is not None:
-        rx, ry = int(intent.raw_pos[0] * width), int(intent.raw_pos[1] * height)
-        cv2.circle(frame, (rx, ry), 5, (0, 0, 255), 1, cv2.LINE_AA)
-    if intent.smoothed_pos is not None:
-        sx, sy = int(intent.smoothed_pos[0] * width), int(intent.smoothed_pos[1] * height)
-        cv2.circle(frame, (sx, sy), 9, color, 2, cv2.LINE_AA)
-
-    label = f"{intent.state.value}"
-    if intent.clear_progress > 0.0:
-        label += f"  clear {intent.clear_progress * 100:.0f}%"
-    cv2.putText(frame, label, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1, cv2.LINE_AA)
-
-    if not calibrator.is_complete:
-        remaining = "top-left (1)" if not calibrator.has_top_left else "bottom-right (2)"
-        cv2.putText(
-            frame, f"Calibrate: {remaining}", (8, height - 12),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 220, 255), 1, cv2.LINE_AA,
-        )
+def _toolbar_content_height(config: AppConfig) -> int:
+    """Total vertical space the toolbar's widgets need, independent of
+    where the toolbar is positioned -- computed once so Layout can
+    size the window correctly without a chicken-and-egg rebuild."""
+    rows = -(-len(config.brush_palette) // SWATCH_COLUMNS)  # ceil div
+    height = PADDING
+    height += rows * SWATCH_SIZE + (rows - 1) * SWATCH_GAP
+    height += SECTION_GAP + SIZE_BTN_SIZE
+    height += SECTION_GAP + UNDO_REDO_HEIGHT
+    height += PADDING
+    return height
 
 
 class Layout:
-    """Fixed panel geometry for the Phase 3 window."""
+    """Fixed panel geometry: [toolbar] [preview (optional)] [canvas]."""
 
     def __init__(self, config: AppConfig, show_preview: bool) -> None:
         preview_w = PREVIEW_PANEL_WIDTH if show_preview else 0
         preview_h = int(PREVIEW_PANEL_WIDTH * config.camera_height / config.camera_width) if show_preview else 0
 
-        self.canvas_rect = pygame.Rect(
-            MARGIN + (preview_w + MARGIN if show_preview else 0),
-            MARGIN,
-            config.canvas_pixel_width,
-            config.canvas_pixel_height,
+        self.toolbar_rect = pygame.Rect(MARGIN, MARGIN, TOOLBAR_WIDTH, _toolbar_content_height(config))
+        self.preview_rect = (
+            pygame.Rect(self.toolbar_rect.right + MARGIN, MARGIN, preview_w, preview_h) if show_preview else None
         )
-        self.preview_rect = pygame.Rect(MARGIN, MARGIN, preview_w, preview_h) if show_preview else None
+        canvas_x = (self.preview_rect.right if self.preview_rect else self.toolbar_rect.right) + MARGIN
+        self.canvas_rect = pygame.Rect(canvas_x, MARGIN, config.canvas_pixel_width, config.canvas_pixel_height)
 
         self.window_width = self.canvas_rect.right + MARGIN
-        self.window_height = max(self.canvas_rect.bottom, MARGIN + preview_h) + MARGIN + STATUS_BAR_HEIGHT
+        self.window_height = (
+            max(self.canvas_rect.bottom, self.toolbar_rect.bottom, MARGIN + preview_h) + MARGIN + STATUS_BAR_HEIGHT
+        )
         self.status_rect = pygame.Rect(0, self.window_height - STATUS_BAR_HEIGHT, self.window_width, STATUS_BAR_HEIGHT)
 
 
-def _mouse_to_canvas(layout: "Layout") -> Optional[Tuple[int, int]]:
-    mx, my = pygame.mouse.get_pos()
-    if not layout.canvas_rect.collidepoint(mx, my):
-        return None
-    return (mx - layout.canvas_rect.x, my - layout.canvas_rect.y)
+def _build_toolbar(layout: Layout, config: AppConfig) -> Toolbar:
+    """Lay out color swatches, size presets, and undo/redo inside
+    layout.toolbar_rect, as absolute-positioned Widgets."""
+    x0 = layout.toolbar_rect.x + PADDING
+    y = layout.toolbar_rect.y + PADDING
+    widgets: List[Widget] = []
 
+    for i, color in enumerate(config.brush_palette):
+        col, row = i % SWATCH_COLUMNS, i // SWATCH_COLUMNS
+        rect = pygame.Rect(
+            x0 + col * (SWATCH_SIZE + SWATCH_GAP), y + row * (SWATCH_SIZE + SWATCH_GAP), SWATCH_SIZE, SWATCH_SIZE
+        )
+        widgets.append(Widget(id=f"color:{i}", rect=rect, swatch_color=color))
+    rows = -(-len(config.brush_palette) // SWATCH_COLUMNS)  # ceil div
+    y += rows * (SWATCH_SIZE + SWATCH_GAP) + SECTION_GAP
 
-def _apply_intent_to_canvas(
-    intent: FrameIntent,
-    brush_engine: BrushEngine,
-    canvas_model: CanvasModel,
-    canvas_surface: "pygame.Surface",
-    color: Tuple[int, int, int],
-    size: float,
-) -> None:
-    """The one place drawing/erasing actually happens: turns this
-    frame's FrameIntent into BrushEngine/CanvasModel calls. Identical
-    whether `intent` came from a real hand or DevIntentSource."""
-    if intent.is_drawing and intent.cursor_pos is not None:
-        if intent.stroke_started:
-            brush_engine.begin_stroke(canvas_surface, *intent.cursor_pos, color=color, size=size)
-        else:
-            brush_engine.extend_stroke(canvas_surface, *intent.cursor_pos)
-    elif intent.stroke_ended:
-        finished = brush_engine.end_stroke()
-        if finished is not None:
-            canvas_model.add_stroke(finished)
+    for i, size in enumerate(config.brush_sizes):
+        rect = pygame.Rect(x0 + i * (SIZE_BTN_SIZE + SIZE_BTN_GAP), y, SIZE_BTN_SIZE, SIZE_BTN_SIZE)
+        widgets.append(Widget(id=f"size:{i}", rect=rect, label=str(size)))
+    y += SIZE_BTN_SIZE + SECTION_GAP
 
-    if intent.is_erasing and intent.cursor_pos is not None:
-        if intent.erase_started:
-            brush_engine.begin_stroke(
-                canvas_surface, *intent.cursor_pos,
-                color=canvas_model.background_color, size=size, opacity=1.0, brush_type=BrushType.ERASER,
-            )
-        else:
-            brush_engine.extend_stroke(canvas_surface, *intent.cursor_pos)
-    elif intent.erase_ended:
-        finished = brush_engine.end_stroke()
-        if finished is not None:
-            canvas_model.add_stroke(finished)
+    inner_width = layout.toolbar_rect.width - 2 * PADDING
+    half = (inner_width - 8) // 2
+    widgets.append(Widget(id="undo", rect=pygame.Rect(x0, y, half, UNDO_REDO_HEIGHT), label="Undo"))
+    widgets.append(Widget(id="redo", rect=pygame.Rect(x0 + half + 8, y, half, UNDO_REDO_HEIGHT), label="Redo"))
+
+    return Toolbar(widgets)
 
 
 class _BrushSelection:
-    """Tracks the current size/color presets the keyboard cycles
-    through -- a stand-in for Phase 4's touchless color/size UI."""
+    """Tracks the current size/color the toolbar (or keyboard, as a
+    fallback) has selected."""
 
     def __init__(self, config: AppConfig) -> None:
         self._sizes = list(config.brush_sizes)
@@ -219,9 +159,200 @@ class _BrushSelection:
     def cycle_color(self) -> None:
         self.color_index = (self.color_index + 1) % len(self._colors)
 
+    def sync_widget_selection(self, toolbar: Toolbar) -> None:
+        for widget in toolbar.widgets:
+            if widget.id.startswith("color:"):
+                widget.is_selected = widget.id == f"color:{self.color_index}"
+            elif widget.id.startswith("size:"):
+                widget.is_selected = widget.id == f"size:{self.size_index}"
+
+
+def _dispatch_toolbar_action(
+    widget_id: str,
+    selection: "_BrushSelection",
+    canvas_model: CanvasModel,
+    brush_engine: BrushEngine,
+    canvas_surface: "pygame.Surface",
+) -> None:
+    if widget_id.startswith("color:"):
+        selection.color_index = int(widget_id.split(":", 1)[1])
+    elif widget_id.startswith("size:"):
+        selection.size_index = int(widget_id.split(":", 1)[1])
+    elif widget_id == "undo":
+        canvas_model.undo()
+        brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+    elif widget_id == "redo":
+        canvas_model.redo()
+        brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+
+
+# -- Canvas drawing -----------------------------------------------------------
+
+def _finalize_pending_stroke(intent: FrameIntent, brush_engine: BrushEngine, canvas_model: CanvasModel) -> None:
+    """Ends whatever draw/erase stroke is in progress, if the gesture
+    that started it just ended -- regardless of where the cursor
+    currently is. Always called, every frame, independent of whether
+    the cursor is over the canvas, the toolbar, or neither."""
+    if intent.stroke_ended or intent.erase_ended:
+        finished = brush_engine.end_stroke()
+        if finished is not None:
+            canvas_model.add_stroke(finished)
+
+
+def _continue_canvas_drawing(
+    canvas_local_intent: FrameIntent,
+    brush_engine: BrushEngine,
+    canvas_model: CanvasModel,
+    canvas_surface: "pygame.Surface",
+    color: Tuple[int, int, int],
+    size: float,
+) -> None:
+    """Handles starting/extending a stroke. Only called when the
+    cursor is over the canvas panel; `canvas_local_intent.cursor_pos`
+    must already be canvas-local (not window) coordinates."""
+    intent = canvas_local_intent
+    if intent.is_drawing:
+        if intent.stroke_started:
+            brush_engine.begin_stroke(canvas_surface, *intent.cursor_pos, color=color, size=size)
+        else:
+            brush_engine.extend_stroke(canvas_surface, *intent.cursor_pos)
+    elif intent.is_erasing:
+        if intent.erase_started:
+            brush_engine.begin_stroke(
+                canvas_surface, *intent.cursor_pos,
+                color=canvas_model.background_color, size=size, opacity=1.0, brush_type=BrushType.ERASER,
+            )
+        else:
+            brush_engine.extend_stroke(canvas_surface, *intent.cursor_pos)
+
+
+def _route_intent(
+    intent: FrameIntent,
+    layout: Layout,
+    toolbar: Toolbar,
+    selection: _BrushSelection,
+    canvas_model: CanvasModel,
+    brush_engine: BrushEngine,
+    canvas_surface: "pygame.Surface",
+) -> Optional[ToolbarResult]:
+    """Every frame's single dispatch point: ends any finishing
+    stroke, then sends the cursor to whichever panel it's over --
+    toolbar, canvas, or neither (a no-op, e.g. hovering the preview
+    panel or the open-palm "pause" state). Returns the toolbar's
+    hover/activation result when the toolbar was the target, for the
+    renderer to draw hover/dwell feedback -- None otherwise."""
+    _finalize_pending_stroke(intent, brush_engine, canvas_model)
+
+    pos = intent.cursor_pos
+    if intent.state == IntentState.UI_INTERACTION or pos is None:
+        return None  # open palm = deliberate pause; nothing to route
+
+    if layout.toolbar_rect.collidepoint(pos):
+        result = toolbar.update(pos, selecting=intent.is_drawing)
+        if result.activated_id:
+            _dispatch_toolbar_action(result.activated_id, selection, canvas_model, brush_engine, canvas_surface)
+        return result
+
+    if layout.canvas_rect.collidepoint(pos):
+        local = (pos[0] - layout.canvas_rect.x, pos[1] - layout.canvas_rect.y)
+        local_intent = dataclasses.replace(intent, cursor_pos=local)
+        _continue_canvas_drawing(local_intent, brush_engine, canvas_model, canvas_surface, selection.color, selection.size)
+    return None
+
+
+# -- Resolver / camera helpers (unchanged in spirit from Phase 2/3) ---------
+
+def _build_resolver(config: AppConfig, target_width: int, target_height: int) -> IntentResolver:
+    smoothing_config = SmoothingConfig(
+        min_alpha=config.smoothing_min_alpha,
+        max_alpha=config.smoothing_max_alpha,
+        velocity_lower=config.smoothing_velocity_lower,
+        velocity_upper=config.smoothing_velocity_upper,
+        min_movement_threshold=config.smoothing_min_movement_threshold,
+    )
+    mapper_config = MapperConfig(
+        margin_left=config.canvas_margin, margin_right=config.canvas_margin,
+        margin_top=config.canvas_margin, margin_bottom=config.canvas_margin,
+        sensitivity=config.pointer_sensitivity,
+    )
+    state_config = StateMachineConfig(
+        debounce_frames=config.gesture_debounce_frames,
+        hand_lost_grace_frames=config.hand_lost_grace_frames,
+        fist_confirm_frames=config.fist_confirm_frames,
+    )
+    return IntentResolver(
+        canvas_width=target_width, canvas_height=target_height,
+        smoothing_config=smoothing_config, mapper_config=mapper_config, state_config=state_config,
+        pinch_threshold=config.pinch_threshold,
+    )
+
+
+def _frame_to_surface(frame_bgr: np.ndarray) -> "pygame.Surface":
+    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    return pygame.surfarray.make_surface(np.transpose(rgb, (1, 0, 2)))
+
+
+def _draw_camera_overlay(frame: np.ndarray, hands, intent: FrameIntent, calibrator: Calibrator) -> None:
+    height, width = frame.shape[:2]
+    for hand in hands:
+        points = hand.pixel_landmarks(width, height)
+        for start, end in HAND_CONNECTIONS:
+            cv2.line(frame, points[start], points[end], (0, 220, 255), 2, cv2.LINE_AA)
+        for x, y in points:
+            cv2.circle(frame, (x, y), 3, (255, 255, 255), -1, cv2.LINE_AA)
+
+    color = _STATE_COLORS.get(intent.state, (255, 255, 255))
+    if intent.raw_pos is not None:
+        rx, ry = int(intent.raw_pos[0] * width), int(intent.raw_pos[1] * height)
+        cv2.circle(frame, (rx, ry), 5, (0, 0, 255), 1, cv2.LINE_AA)
+
+    label = intent.state.value
+    if intent.clear_progress > 0.0:
+        label += f"  clear {intent.clear_progress * 100:.0f}%"
+    cv2.putText(frame, label, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (230, 230, 230), 1, cv2.LINE_AA)
+
+    if not calibrator.is_complete:
+        remaining = "top-left (1)" if not calibrator.has_top_left else "bottom-right (2)"
+        cv2.putText(
+            frame, f"Calibrate: {remaining}", (8, height - 10),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 220, 255), 1, cv2.LINE_AA,
+        )
+
+
+def _mouse_window_pos(layout: Layout) -> Tuple[int, int]:
+    mx, my = pygame.mouse.get_pos()
+    return (
+        max(0, min(mx, layout.window_width - 1)),
+        max(0, min(my, layout.window_height - 1)),
+    )
+
+
+# -- Rendering ----------------------------------------------------------------
+
+def _draw_toolbar(screen: "pygame.Surface", toolbar: Toolbar, hover: Optional[Tuple[Optional[str], float]]) -> None:
+    hovered_id, hover_progress = hover if hover else (None, 0.0)
+    for widget in toolbar.widgets:
+        is_hovered = widget.id == hovered_id
+        if widget.swatch_color is not None:
+            pygame.draw.rect(screen, widget.swatch_color, widget.rect, border_radius=6)
+            border_color = (255, 255, 255) if widget.is_selected else (90, 90, 96)
+            pygame.draw.rect(screen, border_color, widget.rect, width=3 if widget.is_selected else 1, border_radius=6)
+        else:
+            base = (60, 130, 90) if widget.is_selected else (46, 46, 52)
+            pygame.draw.rect(screen, base, widget.rect, border_radius=5)
+            pygame.draw.rect(screen, (110, 110, 118), widget.rect, width=1, border_radius=5)
+
+        if is_hovered and hover_progress > 0.0:
+            fill_h = max(2, int(widget.rect.height * hover_progress))
+            fill_rect = pygame.Rect(widget.rect.x, widget.rect.bottom - fill_h, widget.rect.width, fill_h)
+            glow = pygame.Surface((fill_rect.width, fill_rect.height), pygame.SRCALPHA)
+            glow.fill((255, 255, 255, 90))
+            screen.blit(glow, fill_rect.topleft)
+            pygame.draw.rect(screen, (255, 255, 255), widget.rect, width=2, border_radius=5)
+
 
 def run(config: AppConfig, mouse_mode: bool = False) -> int:
-    """Run the Phase 3 app. Returns a process exit code."""
+    """Run the Phase 4 app. Returns a process exit code."""
     pygame.init()
     pygame.display.set_caption(WINDOW_TITLE)
 
@@ -261,20 +392,23 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
             camera = None
             mouse_mode = True
 
+    state_config = StateMachineConfig(
+        debounce_frames=config.gesture_debounce_frames,
+        hand_lost_grace_frames=config.hand_lost_grace_frames,
+        fist_confirm_frames=config.fist_confirm_frames,
+    )
     if mouse_mode:
-        dev_source = DevIntentSource(
-            StateMachineConfig(
-                debounce_frames=config.gesture_debounce_frames,
-                hand_lost_grace_frames=config.hand_lost_grace_frames,
-                fist_confirm_frames=config.fist_confirm_frames,
-            )
-        )
-    else:
-        resolver = _build_resolver(config)
+        dev_source = DevIntentSource(state_config)
 
     layout = Layout(config, show_preview=not mouse_mode)
+    toolbar = _build_toolbar(layout, config)
+
+    if not mouse_mode:
+        resolver = _build_resolver(config, layout.window_width, layout.window_height)
+
     screen = pygame.display.set_mode((layout.window_width, layout.window_height))
     font = pygame.font.SysFont("Menlo,Consolas,monospace", 16)
+    small_font = pygame.font.SysFont("Menlo,Consolas,monospace", 12)
 
     canvas_model = CanvasModel(
         width=config.canvas_pixel_width, height=config.canvas_pixel_height,
@@ -288,8 +422,9 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
     clock = pygame.time.Clock()
     warned_stale = False
     running = True
+    last_hover: Tuple[Optional[str], float] = (None, 0.0)
 
-    logger.info("AirCanvas Phase 3 running (%s mode). Press Q to quit.", "mouse" if mouse_mode else "camera")
+    logger.info("AirCanvas Phase 4 running (%s mode). Press Q to quit.", "mouse" if mouse_mode else "camera")
 
     while running:
         for event in pygame.event.get():
@@ -316,11 +451,11 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
         hands: List[HandResult] = []
         frame = None
         if mouse_mode:
-            cursor = _mouse_to_canvas(layout)
+            window_pos = _mouse_window_pos(layout)
             buttons = pygame.mouse.get_pressed()
             keys = pygame.key.get_pressed()
             intent = dev_source.update(
-                cursor_pos=cursor, left_button=buttons[0], right_button=buttons[2], fist_key=keys[pygame.K_f],
+                cursor_pos=window_pos, left_button=buttons[0], right_button=buttons[2], fist_key=keys[pygame.K_f],
             )
         else:
             frame = camera.read()
@@ -342,7 +477,9 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
                     if calibrator.is_complete:
                         resolver.apply_calibration(calibrator, sensitivity=config.pointer_sensitivity)
 
-        _apply_intent_to_canvas(intent, brush_engine, canvas_model, canvas_surface, selection.color, selection.size)
+        selection.sync_widget_selection(toolbar)
+        toolbar_result = _route_intent(intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface)
+        last_hover = (toolbar_result.hovered_id, toolbar_result.hover_progress) if toolbar_result else (None, 0.0)
 
         if intent.clear_confirmed:
             if canvas_model.clear():
@@ -350,6 +487,10 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
 
         # -- Render --
         screen.fill(PANEL_BG)
+
+        pygame.draw.rect(screen, TOOLBAR_BG, layout.toolbar_rect.inflate(PADDING, PADDING), border_radius=8)
+        _draw_toolbar(screen, toolbar, last_hover)
+
         screen.blit(canvas_surface, layout.canvas_rect.topleft)
         pygame.draw.rect(screen, (60, 60, 66), layout.canvas_rect, width=1)
 
@@ -361,12 +502,10 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
             screen.blit(preview_surface, layout.preview_rect.topleft)
             pygame.draw.rect(screen, (60, 60, 66), layout.preview_rect, width=1)
 
-        # Cursor indicator on the canvas panel itself.
         if intent.cursor_pos is not None:
-            cx = layout.canvas_rect.x + intent.cursor_pos[0]
-            cy = layout.canvas_rect.y + intent.cursor_pos[1]
             ring_color = _STATE_COLORS.get(intent.state, (255, 255, 255))
-            pygame.draw.circle(screen, ring_color, (cx, cy), max(int(selection.size / 2), 3), 2)
+            radius = max(int(selection.size / 2), 3) if layout.canvas_rect.collidepoint(intent.cursor_pos) else 6
+            pygame.draw.circle(screen, ring_color, intent.cursor_pos, radius, 2)
 
         pygame.draw.rect(screen, (16, 16, 20), layout.status_rect)
         fps = clock.get_fps()
