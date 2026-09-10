@@ -7,9 +7,10 @@ Usage:
     python main.py --camera 1       # use a specific camera index
     python main.py --debug          # verbose logging
     python main.py --mouse          # developer mode: mouse + keyboard, no camera
+    python main.py --open art.aircanvas   # load a saved project at startup
 
-Flags like `--open artwork.aircanvas` (from the full project CLI)
-arrive once save/load exists in a later phase.
+In-app: S saves, E exports a PNG + share card, R toggles replay mode.
+See README.md for the full control list.
 """
 from __future__ import annotations
 
@@ -31,6 +32,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Developer mode: simulate the fingertip with the mouse (left=draw, right=erase, F=hold to clear). "
              "Testing only -- never required for normal use.",
     )
+    parser.add_argument("--open", type=str, default=None, metavar="PATH", help="Load a saved .aircanvas project at startup")
     return parser
 
 
@@ -43,7 +45,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         overrides["camera_index"] = args.camera
     config = load_config(overrides)
 
-    return app.run(config, mouse_mode=args.mouse)
+    return app.run(config, mouse_mode=args.mouse, open_path=args.open)
 
 
 if __name__ == "__main__":

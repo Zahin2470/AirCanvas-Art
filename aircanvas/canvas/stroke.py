@@ -21,14 +21,23 @@ Point = Tuple[float, float]
 @dataclass
 class Stroke:
     points: List[Point] = field(default_factory=list)
+    # Seconds elapsed since the stroke began, parallel to `points`.
+    # Populated during live drawing (see BrushEngine.begin_stroke /
+    # extend_stroke); may be shorter than `points` or empty for
+    # strokes built without real timing (tests, synthetic strokes) --
+    # replay treats a length mismatch as "timing unavailable" and
+    # falls back to assuming evenly-spaced points.
+    point_times: List[float] = field(default_factory=list)
     color: Tuple[int, int, int] = (240, 240, 245)
     size: float = 10.0
     opacity: float = 1.0  # 0..1
     brush_type: BrushType = BrushType.SMOOTH_INK
     created_at: float = field(default_factory=time.time)
 
-    def add_point(self, x: float, y: float) -> None:
+    def add_point(self, x: float, y: float, t: Optional[float] = None) -> None:
         self.points.append((x, y))
+        if t is not None:
+            self.point_times.append(t)
 
     @property
     def is_empty(self) -> bool:

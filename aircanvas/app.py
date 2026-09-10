@@ -1,28 +1,31 @@
 """
-Phase 5 application shell.
+Phase 6 application shell.
 
-Adds advanced brushes, particles, and the "Living Ink" signature
-effect on top of Phase 4's touchless canvas + toolbar:
+Adds project save/load, PNG export, a share card, and artwork replay
+on top of Phase 5's brushes/particles:
 
-  * All six brush types (plus the eraser) are now selectable from the
-    toolbar, each with its own distinct look -- see
-    canvas/brush_engine.py for how they're rendered.
-  * A bounded ParticleSystem + LivingInkEmitter (rendering/particles.py,
-    rendering/effects.py) add fading motes that trail the cursor,
-    trickle off an active stroke scaled by drawing speed, burst on a
-    sharp direction change, and settle when a stroke starts/ends.
-    This is a purely decorative overlay drawn on top of everything
-    else each frame -- it never touches canvas_surface, so it has no
-    effect on undo/redo/replay correctness.
+  * S saves the current canvas as a `.aircanvas` JSON project
+    (persistence/project_io.py); E exports a PNG and a composited
+    share card (persistence/share_card.py) alongside it.
+  * The app auto-saves a recovery copy periodically and reloads it on
+    the next launch if the previous session didn't exit cleanly --
+    "automatic recovery save where practical", per the project spec.
+  * R toggles Replay mode, which reconstructs the drawing stroke-by-
+    stroke (and point-by-point, where timing was recorded) using
+    canvas/replay.py's ReplayController, onto a separate surface that
+    never touches the live canvas -- exiting replay resumes editing
+    exactly where you left off.
 
-Toolbar-vs-canvas routing, coordinate mapping, and calibration are
-unchanged from Phase 4.
+Touchless brushes/particles/toolbar are unchanged from Phase 5;
+save/export/replay controls are keyboard-driven utility actions, the
+same pattern as calibration's keyboard fallback in earlier phases.
 """
 from __future__ import annotations
 
 import dataclasses
 import logging
 import random
+import time
 from typing import List, Optional, Tuple
 
 import cv2
@@ -32,10 +35,13 @@ import pygame
 from aircanvas.canvas.brush_engine import BrushEngine
 from aircanvas.canvas.brushes import BrushType, SELECTABLE_BRUSHES
 from aircanvas.canvas.model import CanvasModel
-from aircanvas.config import AppConfig
+from aircanvas.canvas.replay import ReplayController
+from aircanvas.config import AppConfig, get_exports_dir, get_projects_dir, get_recovery_path
 from aircanvas.interaction.dev_input import DevIntentSource
 from aircanvas.interaction.intent import FrameIntent, IntentResolver
 from aircanvas.interaction.state_machine import IntentState, StateMachineConfig
+from aircanvas.persistence.project_io import ProjectLoadError, export_png, load_project, save_project
+from aircanvas.persistence.share_card import build_share_card
 from aircanvas.rendering.effects import LivingInkEmitter
 from aircanvas.rendering.particles import ParticleSystem
 from aircanvas.ui.toolbar import Toolbar, ToolbarResult, Widget
@@ -46,12 +52,13 @@ from aircanvas.vision.tracker import HAND_CONNECTIONS, HandResult, HandTracker, 
 
 logger = logging.getLogger("aircanvas.app")
 
-WINDOW_TITLE = "AirCanvas — Phase 5"
+WINDOW_TITLE = "AirCanvas — Phase 6"
 PREVIEW_PANEL_WIDTH = 260
 TOOLBAR_WIDTH = 176
 MARGIN = 14
 PADDING = 10
 STATUS_BAR_HEIGHT = 30
+REPLAY_BAR_HEIGHT = 8
 PANEL_BG = (10, 10, 13)
 TOOLBAR_BG = (22, 22, 27)
 STATUS_TEXT_COLOR = (200, 200, 205)
@@ -432,8 +439,97 @@ def _update_living_ink(
         emitter.on_idle_point(pos[0], pos[1], color, size, dt=dt)
 
 
-def run(config: AppConfig, mouse_mode: bool = False) -> int:
-    """Run the Phase 5 app. Returns a process exit code."""
+def _load_starting_canvas(config: AppConfig, open_path: Optional[str]) -> CanvasModel:
+    """Resolve what canvas to start with, in priority order: an
+    explicit --open path, then an unclean-shutdown recovery file, then
+    a blank canvas. Never raises -- a bad file falls through to the
+    next option with a clear message instead of crashing startup."""
+    blank_kwargs = dict(
+        width=config.canvas_pixel_width, height=config.canvas_pixel_height,
+        background_color=config.canvas_background_color,
+    )
+
+    if open_path is not None:
+        try:
+            model, _ = load_project(open_path)
+            model.resize(config.canvas_pixel_width, config.canvas_pixel_height)
+            logger.info("Loaded project from %s (%d strokes)", open_path, model.stroke_count)
+            return model
+        except ProjectLoadError as exc:
+            logger.error("Could not open %s: %s", open_path, exc)
+            print(f"\nCould not open '{open_path}': {exc}\nStarting with a blank canvas instead.\n")
+            return CanvasModel(**blank_kwargs)
+
+    recovery_path = get_recovery_path()
+    if recovery_path.exists():
+        try:
+            model, _ = load_project(recovery_path)
+            model.resize(config.canvas_pixel_width, config.canvas_pixel_height)
+            logger.info("Recovered unsaved work from a previous session (%d strokes).", model.stroke_count)
+            print(f"\nRecovered unsaved work from a previous session ({model.stroke_count} strokes).\n")
+            return model
+        except ProjectLoadError as exc:
+            logger.warning("Recovery file exists but could not be loaded (%s); starting blank.", exc)
+
+    return CanvasModel(**blank_kwargs)
+
+
+def _save_project_with_timestamp(canvas_model: CanvasModel) -> None:
+    path = get_projects_dir() / f"aircanvas_{time.strftime('%Y%m%d_%H%M%S')}.aircanvas"
+    try:
+        save_project(path, canvas_model, metadata={"stroke_count": canvas_model.stroke_count})
+        logger.info("Saved project to %s", path)
+        print(f"\nSaved: {path}\n")
+    except OSError as exc:
+        logger.error("Could not save project: %s", exc)
+        print(f"\nCould not save project: {exc}\n")
+
+
+def _export_png_and_share_card(canvas_surface: "pygame.Surface", canvas_model: CanvasModel) -> None:
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    export_dir = get_exports_dir()
+    png_path = export_dir / f"aircanvas_{timestamp}.png"
+    card_path = export_dir / f"aircanvas_{timestamp}_share.png"
+    try:
+        export_png(png_path, canvas_surface)
+        build_share_card(
+            png_path, card_path, title="AirCanvas Artwork",
+            stroke_count=canvas_model.stroke_count, created_at=time.time(),
+        )
+        logger.info("Exported PNG to %s and share card to %s", png_path, card_path)
+        print(f"\nExported: {png_path}\nShare card: {card_path}\n")
+    except OSError as exc:
+        logger.error("Could not export: %s", exc)
+        print(f"\nCould not export: {exc}\n")
+
+
+def _draw_replay_overlay(
+    screen: "pygame.Surface", layout: Layout, controller: ReplayController, font: "pygame.font.Font"
+) -> None:
+    bar_rect = pygame.Rect(
+        layout.canvas_rect.x, layout.canvas_rect.bottom + 6, layout.canvas_rect.width, REPLAY_BAR_HEIGHT
+    )
+    pygame.draw.rect(screen, (50, 50, 56), bar_rect, border_radius=4)
+    fill_width = max(0, int(bar_rect.width * controller.progress))
+    if fill_width > 0:
+        fill_rect = pygame.Rect(bar_rect.x, bar_rect.y, fill_width, bar_rect.height)
+        pygame.draw.rect(screen, (90, 190, 255), fill_rect, border_radius=4)
+
+    state = "Playing" if controller.is_playing else "Paused"
+    label = (
+        f"REPLAY  |  {state}  |  Speed {controller.speed:.2g}x  |  {controller.progress * 100:.0f}%  |  "
+        "Space play/pause \u00b7 \u2190/\u2192 seek \u00b7 \u2191/\u2193 speed \u00b7 Home restart \u00b7 R exit"
+    )
+    text = font.render(label, True, (230, 235, 245))
+    label_bg = pygame.Rect(layout.canvas_rect.x, layout.canvas_rect.y, layout.canvas_rect.width, 26)
+    overlay = pygame.Surface((label_bg.width, label_bg.height), pygame.SRCALPHA)
+    overlay.fill((10, 10, 14, 190))
+    screen.blit(overlay, label_bg.topleft)
+    screen.blit(text, (label_bg.x + 8, label_bg.y + 5))
+
+
+def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = None) -> int:
+    """Run the Phase 6 app. Returns a process exit code."""
     pygame.init()
     pygame.display.set_caption(WINDOW_TITLE)
 
@@ -491,10 +587,7 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
     font = pygame.font.SysFont("Menlo,Consolas,monospace", 16)
     widget_font = pygame.font.SysFont("Menlo,Consolas,monospace", 12)
 
-    canvas_model = CanvasModel(
-        width=config.canvas_pixel_width, height=config.canvas_pixel_height,
-        background_color=config.canvas_background_color,
-    )
+    canvas_model = _load_starting_canvas(config, open_path)
     canvas_surface = pygame.Surface((canvas_model.width, canvas_model.height))
     brush_engine = BrushEngine()
     brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
@@ -509,12 +602,18 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
     )
     particles_enabled = config.particles_enabled
 
+    replay_mode = False
+    replay_controller: Optional[ReplayController] = None
+    replay_surface = pygame.Surface((canvas_model.width, canvas_model.height))
+
+    recovery_timer = 0.0
+
     clock = pygame.time.Clock()
     warned_stale = False
     running = True
     last_hover: Tuple[Optional[str], float] = (None, 0.0)
 
-    logger.info("AirCanvas Phase 5 running (%s mode). Press Q to quit.", "mouse" if mouse_mode else "camera")
+    logger.info("AirCanvas Phase 6 running (%s mode). Press Q to quit.", "mouse" if mouse_mode else "camera")
 
     while running:
         dt = clock.tick(60) / 1000.0
@@ -525,6 +624,27 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
             elif event.type == pygame.KEYDOWN:
                 if event.key in (pygame.K_q, pygame.K_ESCAPE):
                     running = False
+                elif event.key == pygame.K_r:
+                    if replay_mode:
+                        replay_mode = False
+                    else:
+                        replay_controller = ReplayController(list(canvas_model.strokes))
+                        replay_controller.play()
+                        replay_mode = True
+                elif replay_mode:
+                    if event.key == pygame.K_SPACE:
+                        replay_controller.toggle()
+                    elif event.key in (pygame.K_HOME, pygame.K_BACKSPACE):
+                        replay_controller.restart()
+                        replay_controller.play()
+                    elif event.key == pygame.K_LEFT:
+                        replay_controller.seek_relative(-0.05)
+                    elif event.key == pygame.K_RIGHT:
+                        replay_controller.seek_relative(0.05)
+                    elif event.key == pygame.K_UP:
+                        replay_controller.set_speed(replay_controller.speed * 2)
+                    elif event.key == pygame.K_DOWN:
+                        replay_controller.set_speed(replay_controller.speed / 2)
                 elif event.key == pygame.K_z:
                     canvas_model.undo()
                     brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
@@ -545,6 +665,10 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
                         particles.clear()
                 elif event.key == pygame.K_c and resolver is not None:
                     calibrator.reset()
+                elif event.key == pygame.K_s:
+                    _save_project_with_timestamp(canvas_model)
+                elif event.key == pygame.K_e:
+                    _export_png_and_share_card(canvas_surface, canvas_model)
 
         hands: List[HandResult] = []
         frame = None
@@ -568,24 +692,40 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
                 intent = resolver.update(hands)
 
                 keys = pygame.key.get_pressed()
-                if keys[pygame.K_1] and intent.raw_pos is not None:
-                    calibrator.set_top_left(*intent.raw_pos)
-                if keys[pygame.K_2] and intent.raw_pos is not None:
-                    calibrator.set_bottom_right(*intent.raw_pos)
-                    if calibrator.is_complete:
-                        resolver.apply_calibration(calibrator, sensitivity=config.pointer_sensitivity)
+                if not replay_mode:
+                    if keys[pygame.K_1] and intent.raw_pos is not None:
+                        calibrator.set_top_left(*intent.raw_pos)
+                    if keys[pygame.K_2] and intent.raw_pos is not None:
+                        calibrator.set_bottom_right(*intent.raw_pos)
+                        if calibrator.is_complete:
+                            resolver.apply_calibration(calibrator, sensitivity=config.pointer_sensitivity)
 
-        selection.sync_widget_selection(toolbar)
-        toolbar_result = _route_intent(intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface)
-        last_hover = (toolbar_result.hovered_id, toolbar_result.hover_progress) if toolbar_result else (None, 0.0)
+        if replay_mode:
+            replay_controller.advance(dt)
+            replay_controller.render(replay_surface, brush_engine, canvas_model.background_color)
+            last_hover = (None, 0.0)
+        else:
+            selection.sync_widget_selection(toolbar)
+            toolbar_result = _route_intent(
+                intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface
+            )
+            last_hover = (toolbar_result.hovered_id, toolbar_result.hover_progress) if toolbar_result else (None, 0.0)
 
-        if intent.clear_confirmed:
-            if canvas_model.clear():
-                brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+            if intent.clear_confirmed:
+                if canvas_model.clear():
+                    brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
 
-        if particles_enabled:
-            _update_living_ink(intent, living_ink, selection.color, selection.size, dt)
-            particles.update(dt)
+            if particles_enabled:
+                _update_living_ink(intent, living_ink, selection.color, selection.size, dt)
+                particles.update(dt)
+
+            recovery_timer += dt
+            if recovery_timer >= config.recovery_autosave_interval_sec:
+                recovery_timer = 0.0
+                try:
+                    save_project(get_recovery_path(), canvas_model)
+                except OSError as exc:
+                    logger.warning("Recovery autosave failed: %s", exc)
 
         # -- Render --
         screen.fill(PANEL_BG)
@@ -593,7 +733,7 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
         pygame.draw.rect(screen, TOOLBAR_BG, layout.toolbar_rect.inflate(PADDING, PADDING), border_radius=8)
         _draw_toolbar(screen, toolbar, last_hover, widget_font)
 
-        screen.blit(canvas_surface, layout.canvas_rect.topleft)
+        screen.blit(replay_surface if replay_mode else canvas_surface, layout.canvas_rect.topleft)
         pygame.draw.rect(screen, (60, 60, 66), layout.canvas_rect, width=1)
 
         if layout.preview_rect is not None and frame is not None:
@@ -604,23 +744,29 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
             screen.blit(preview_surface, layout.preview_rect.topleft)
             pygame.draw.rect(screen, (60, 60, 66), layout.preview_rect, width=1)
 
-        if particles_enabled:
-            particles.render(screen)
-
-        if intent.cursor_pos is not None:
-            ring_color = _STATE_COLORS.get(intent.state, (255, 255, 255))
-            radius = max(int(selection.size / 2), 3) if layout.canvas_rect.collidepoint(intent.cursor_pos) else 6
-            pygame.draw.circle(screen, ring_color, intent.cursor_pos, radius, 2)
+        if replay_mode:
+            _draw_replay_overlay(screen, layout, replay_controller, widget_font)
+        else:
+            if particles_enabled:
+                particles.render(screen)
+            if intent.cursor_pos is not None:
+                ring_color = _STATE_COLORS.get(intent.state, (255, 255, 255))
+                radius = max(int(selection.size / 2), 3) if layout.canvas_rect.collidepoint(intent.cursor_pos) else 6
+                pygame.draw.circle(screen, ring_color, intent.cursor_pos, radius, 2)
 
         pygame.draw.rect(screen, (16, 16, 20), layout.status_rect)
         fps = clock.get_fps()
-        status = (
-            f"{'MOUSE' if mouse_mode else intent.state.value.upper()}  |  "
-            f"{_BRUSH_LABELS.get(selection.brush_type, selection.brush_type.value)} {int(selection.size)}px  |  "
-            f"Strokes {canvas_model.stroke_count}  |  "
-            f"Undo:{'Y' if canvas_model.can_undo else 'n'} Redo:{'Y' if canvas_model.can_redo else 'n'}  |  "
-            f"{'Particles:' + str(particles.count) if particles_enabled else 'Particles off'}  |  FPS {fps:.0f}"
-        )
+        if replay_mode:
+            status = f"REPLAY MODE  |  Press R to return to drawing  |  FPS {fps:.0f}"
+        else:
+            status = (
+                f"{'MOUSE' if mouse_mode else intent.state.value.upper()}  |  "
+                f"{_BRUSH_LABELS.get(selection.brush_type, selection.brush_type.value)} {int(selection.size)}px  |  "
+                f"Strokes {canvas_model.stroke_count}  |  "
+                f"Undo:{'Y' if canvas_model.can_undo else 'n'} Redo:{'Y' if canvas_model.can_redo else 'n'}  |  "
+                f"{'Particles:' + str(particles.count) if particles_enabled else 'Particles off'}  |  "
+                f"S save \u00b7 E export \u00b7 R replay  |  FPS {fps:.0f}"
+            )
         screen.blit(font.render(status, True, STATUS_TEXT_COLOR), (layout.status_rect.x + 10, layout.status_rect.y + 6))
 
         pygame.display.flip()
@@ -629,5 +775,11 @@ def run(config: AppConfig, mouse_mode: bool = False) -> int:
         tracker.close()
     if camera is not None:
         camera.release()
+    recovery_path = get_recovery_path()
+    if recovery_path.exists():
+        try:
+            recovery_path.unlink()  # clean exit -- no need to offer recovery next launch
+        except OSError:
+            pass
     pygame.quit()
     return 0

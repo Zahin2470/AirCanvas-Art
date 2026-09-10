@@ -3,39 +3,39 @@
 A touchless painting studio: move your index fingertip through the air in
 front of your webcam and paint onto a virtual canvas.
 
-**Status: Phase 5 of 8** — all six brush styles are real and touchlessly
-selectable, plus AirCanvas's signature "Living Ink" effect: fading motes
-trail your cursor, trickle off an active stroke, burst on a sharp turn,
-and settle when a stroke starts or ends.
+**Status: Phase 6 of 8** — save/load projects, PNG export with a shareable
+preview card, artwork replay, and crash recovery, on top of Phase 5's
+brushes and Living Ink.
 
 ## What's here right now
 
-- `main.py` — CLI entry point
-- `aircanvas/config.py` — runtime configuration (camera, tracking, smoothing,
-  mapping, gesture/state-machine, brush/palette, particle/Living Ink settings)
+- `main.py` — CLI entry point (now with `--open PATH`)
+- `aircanvas/config.py` — runtime configuration, plus app-data paths for
+  projects, exports, and crash recovery
 - `aircanvas/vision/` — camera, MediaPipe tracker, features, gestures,
   smoothing, calibration (unchanged since Phase 2)
-- `aircanvas/interaction/state_machine.py` — debounced intent state machine
-- `aircanvas/interaction/intent.py` — per-frame `FrameIntent` (stroke and
-  erase start/end tracking)
-- `aircanvas/interaction/dev_input.py` — developer mouse/keyboard input
-  source (see Developer Mode below)
-- `aircanvas/canvas/stroke.py`, `model.py`, `history.py`, `eraser.py` —
-  unchanged since Phase 3
-- `aircanvas/canvas/brush_engine.py` — a distinct renderer per brush type,
-  deterministic (position-derived jitter, not live randomness) so undo/redo
-  redraws are pixel-identical
-- `aircanvas/rendering/particles.py` — a bounded, deterministic particle
-  system (seeded RNG, capped pool)
-- `aircanvas/rendering/effects.py` — `LivingInkEmitter`: the emission
-  *rules* (when/how many motes to spawn) built on top of the particle system
-- `aircanvas/ui/toolbar.py` — the touchless toolbar (color, size, brush
-  type, undo/redo — unchanged mechanism since Phase 4)
+- `aircanvas/interaction/` — intent state machine, `FrameIntent` resolver,
+  developer mouse/keyboard input source (unchanged since Phase 3)
+- `aircanvas/canvas/stroke.py` — now also records `point_times` (seconds
+  since the stroke began) alongside each point, for replay pacing
+- `aircanvas/canvas/brush_engine.py` — unchanged rendering, plus a public
+  `render_stroke()` used by both `render_full()` and replay
+- `aircanvas/canvas/model.py`, `history.py`, `eraser.py`, `brushes.py` —
+  unchanged since Phase 3/5
+- `aircanvas/canvas/replay.py` — `ReplayController`: reconstructs the
+  drawing stroke-by-stroke and point-by-point, with play/pause/seek/speed
+- `aircanvas/persistence/project_io.py` — JSON `.aircanvas` save/load
+  (never pickle) with atomic writes and clear error messages, plus PNG export
+- `aircanvas/persistence/share_card.py` — composites the artwork with a
+  title, stroke count, and date into a shareable preview image
+- `aircanvas/rendering/particles.py`, `effects.py` — Living Ink (unchanged
+  since Phase 5)
+- `aircanvas/ui/toolbar.py` — the touchless toolbar (unchanged since Phase 4)
 - `aircanvas/app.py` — the pygame app: toolbar, camera preview, canvas,
-  particle overlay, status bar, and per-frame routing between them
-- `aircanvas/{rendering/renderer.py,rendering/hud.py,rendering/themes.py,audio,persistence}` —
+  replay overlay, status bar, save/export/recovery wiring
+- `aircanvas/{rendering/renderer.py,rendering/hud.py,rendering/themes.py,audio,persistence/settings.py}` —
   empty scaffolding for later phases (see Roadmap below)
-- `aircanvas/tests/` — 172 unit tests, all hardware/network-free
+- `aircanvas/tests/` — 221 unit tests, all hardware/network-free
 
 ## A note on MediaPipe versions
 
@@ -136,7 +136,34 @@ real hand does — it's a stand-in for the *input*, not a separate code
 path. Per the project spec, this is for testing only and is never
 required for normal use.
 
-### A note on toolbar-vs-canvas routing
+### Save, export, and replay
+
+- **S** — save the current canvas as a `.aircanvas` project (JSON, never
+  pickle) to `~/.aircanvas/projects/aircanvas_<timestamp>.aircanvas`
+- **E** — export a PNG and a composited share card (artwork + title +
+  stroke count + date) to `~/.aircanvas/exports/`
+- **R** — toggle Replay mode, which reconstructs the drawing stroke-by-
+  stroke (and point-by-point, where timing was recorded) on a separate
+  surface — exiting replay resumes editing exactly where you left off,
+  untouched. While replaying: **Space** play/pause, **←/→** seek, **↑/↓**
+  speed, **Home** restart
+
+```bash
+python main.py --open path/to/artwork.aircanvas   # load a saved project at startup
+```
+
+**Crash recovery:** AirCanvas autosaves a recovery copy every ~15 seconds
+while you work. If the app exits cleanly (Q/Esc/window close), that
+recovery file is deleted. If it doesn't — a crash, a force-quit — the
+recovery file is still there, and AirCanvas reloads it automatically the
+next time you launch, printing how many strokes it recovered.
+
+**Known limitation:** loading a project saved at a different canvas size
+than the app's current window keeps the strokes' raw coordinates as-is
+rather than remapping them proportionally, so strokes may appear
+cropped or offset if the two sizes differ significantly. Fine for the
+common case (nothing currently changes the canvas size), worth revisiting
+if canvas resizing is ever added.
 
 The fingertip cursor spans the *whole window*, not just the canvas —
 that's what lets it reach the toolbar. Every frame, AirCanvas checks where
@@ -158,12 +185,12 @@ pytest aircanvas/tests -v
 Tests are hardware-free: the camera tests mock `cv2.VideoCapture`, the
 tracker tests exercise data structures and model-caching logic without
 loading a real model, the feature/gesture/smoothing/calibration/state-
-machine/intent/dev-input/toolbar tests run against synthetic data
+machine/intent/dev-input/toolbar/replay tests run against synthetic data
 (`aircanvas/tests/helpers.py`), the particle/Living Ink tests use a seeded
-`random.Random` for reproducibility, and the canvas + brush-style tests
+`random.Random` for reproducibility, the canvas + brush-style tests
 (`stroke`, `history`, `model`, `eraser`, `brush_engine`, `brush_styles`)
-run against a real but headless pygame `Surface` — no window or display
-needed.
+run against a real but headless pygame `Surface`, and the project-save and
+share-card tests round-trip through real temp files on disk (`tmp_path`).
 
 ## Roadmap
 
@@ -174,6 +201,7 @@ needed.
 | 3 ✅ | Canvas model, stroke representation, basic brush, undo/redo |
 | 4 ✅ | Touchless tool/color/size controls |
 | 5 ✅ | Advanced brushes, particles, Living Ink, animation polish |
+| 6 ✅ | Project save/load, PNG export, replay, share card |
 | 3 | Canvas model, stroke representation, basic brush, undo/redo |
 | 4 | Touchless tool/color/size controls |
 | 5 | Advanced brushes, particles, Living Ink, animation polish |

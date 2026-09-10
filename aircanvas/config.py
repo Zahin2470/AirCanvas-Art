@@ -37,6 +37,26 @@ def get_models_dir() -> Path:
     return get_app_data_dir() / "models"
 
 
+def get_projects_dir() -> Path:
+    """Default directory for saved `.aircanvas` project files."""
+    return get_app_data_dir() / "projects"
+
+
+def get_exports_dir() -> Path:
+    """Default directory for exported PNGs and share cards."""
+    return get_app_data_dir() / "exports"
+
+
+def get_recovery_path() -> Path:
+    """Path to the auto-saved crash-recovery project.
+
+    Written periodically while the app runs (see app.py) and cleared
+    on a clean exit, so its presence at the next launch signals the
+    previous session ended abnormally.
+    """
+    return get_app_data_dir() / "recovery.aircanvas"
+
+
 @dataclass(frozen=True)
 class AppConfig:
     """Immutable runtime configuration.
@@ -90,6 +110,9 @@ class AppConfig:
     living_ink_base_rate: float = 12.0
     living_ink_velocity_scale: float = 6.0
     living_ink_idle_rate: float = 2.0
+
+    # -- Save/export/recovery (see persistence/project_io.py) --
+    recovery_autosave_interval_sec: float = 15.0
 
     # -- Pointer smoothing (see vision/smoothing.py) --
     smoothing_min_alpha: float = 0.15

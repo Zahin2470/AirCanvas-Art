@@ -41,6 +41,7 @@ from __future__ import annotations
 import colorsys
 import math
 import random
+import time
 from typing import Dict, Iterable, Optional, Tuple
 
 import pygame
@@ -87,6 +88,7 @@ class BrushEngine:
     def __init__(self) -> None:
         self._active: Optional[Stroke] = None
         self._active_distance: float = 0.0
+        self._active_start_time: float = 0.0
 
     @property
     def active_stroke(self) -> Optional[Stroke]:
@@ -107,24 +109,35 @@ class BrushEngine:
         size: float,
         opacity: float = 1.0,
         brush_type: BrushType = BrushType.SMOOTH_INK,
+        now: Optional[float] = None,
     ) -> Stroke:
         """Start a new stroke at (x, y) and paint its first stamp
         immediately, so even a stroke that never gets a second point
-        (a tap) leaves a visible mark."""
-        stroke = Stroke(points=[(x, y)], color=color, size=size, opacity=opacity, brush_type=brush_type)
+        (a tap) leaves a visible mark.
+
+        `now` (seconds, e.g. from time.monotonic()) lets callers pin
+        down the stroke's start time for deterministic tests; real
+        drawing can leave it as None to use the wall clock. This time
+        is only used to derive `point_times` for replay pacing -- it
+        has no effect on the stroke's baked appearance.
+        """
+        stroke = Stroke(points=[(x, y)], point_times=[0.0], color=color, size=size, opacity=opacity, brush_type=brush_type)
         self._active = stroke
         self._active_distance = 0.0
+        self._active_start_time = now if now is not None else time.monotonic()
         self._place_stamp(surface, (x, y), stroke, distance_along=0.0)
         return stroke
 
-    def extend_stroke(self, surface: "pygame.Surface", x: float, y: float) -> None:
+    def extend_stroke(self, surface: "pygame.Surface", x: float, y: float, now: Optional[float] = None) -> None:
         """Add a new raw point to the in-progress stroke and paint
         only the new segment. Safe to call with no active stroke (a
         no-op) so callers don't need to guard every call site."""
         if self._active is None:
             return
+        now = now if now is not None else time.monotonic()
+        elapsed = max(0.0, now - self._active_start_time)
         prev = self._active.points[-1]
-        self._active.add_point(x, y)
+        self._active.add_point(x, y, t=elapsed)
         self._active_distance = self._stamp_segment(surface, prev, (x, y), self._active, self._active_distance)
 
     def end_stroke(self) -> Optional[Stroke]:
@@ -157,7 +170,14 @@ class BrushEngine:
         docstring."""
         surface.fill(background_color)
         for stroke in strokes:
-            self._render_complete_stroke(surface, stroke)
+            self.render_stroke(surface, stroke)
+
+    def render_stroke(self, surface: "pygame.Surface", stroke: Stroke) -> None:
+        """Render one (possibly partial) stroke onto `surface` without
+        touching anything else already there. Public entry point used
+        by render_full above and by canvas/replay.py, which renders
+        strokes one at a time with a truncated point list."""
+        self._render_complete_stroke(surface, stroke)
 
     def _render_complete_stroke(self, surface: "pygame.Surface", stroke: Stroke) -> None:
         if not stroke.points:
