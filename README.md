@@ -3,39 +3,35 @@
 A touchless painting studio: move your index fingertip through the air in
 front of your webcam and paint onto a virtual canvas.
 
-**Status: Phase 6 of 8** — save/load projects, PNG export with a shareable
-preview card, artwork replay, and crash recovery, on top of Phase 5's
-brushes and Living Ink.
+**Status: Phase 7 of 8** — four UI themes, procedurally-generated sound
+feedback, a couple of real accessibility/performance levers, and all of
+it persisted to disk and reloaded automatically next launch.
 
 ## What's here right now
 
-- `main.py` — CLI entry point (now with `--open PATH`)
-- `aircanvas/config.py` — runtime configuration, plus app-data paths for
-  projects, exports, and crash recovery
-- `aircanvas/vision/` — camera, MediaPipe tracker, features, gestures,
-  smoothing, calibration (unchanged since Phase 2)
-- `aircanvas/interaction/` — intent state machine, `FrameIntent` resolver,
-  developer mouse/keyboard input source (unchanged since Phase 3)
-- `aircanvas/canvas/stroke.py` — now also records `point_times` (seconds
-  since the stroke began) alongside each point, for replay pacing
-- `aircanvas/canvas/brush_engine.py` — unchanged rendering, plus a public
-  `render_stroke()` used by both `render_full()` and replay
-- `aircanvas/canvas/model.py`, `history.py`, `eraser.py`, `brushes.py` —
-  unchanged since Phase 3/5
-- `aircanvas/canvas/replay.py` — `ReplayController`: reconstructs the
-  drawing stroke-by-stroke and point-by-point, with play/pause/seek/speed
-- `aircanvas/persistence/project_io.py` — JSON `.aircanvas` save/load
-  (never pickle) with atomic writes and clear error messages, plus PNG export
-- `aircanvas/persistence/share_card.py` — composites the artwork with a
-  title, stroke count, and date into a shareable preview image
+- `main.py` — CLI entry point
+- `aircanvas/config.py` — runtime configuration and app-data paths
+- `aircanvas/vision/`, `aircanvas/interaction/` — tracking and interaction
+  pipeline (unchanged since Phase 4)
+- `aircanvas/canvas/` — stroke model, brush engine, eraser, undo/redo,
+  replay (unchanged since Phase 6)
+- `aircanvas/persistence/project_io.py`, `share_card.py` — save/load/export
+  (unchanged since Phase 6)
+- `aircanvas/persistence/settings.py` — persisted preferences (theme,
+  brush/color/size, mirror, particles, audio) as JSON, corruption-safe
 - `aircanvas/rendering/particles.py`, `effects.py` — Living Ink (unchanged
   since Phase 5)
+- `aircanvas/rendering/themes.py` — the dark/light/neon/monochrome theme
+  registry; themes recolor UI chrome only, never the artwork itself
+- `aircanvas/audio/manager.py` — `AudioManager`: short procedurally-
+  generated tones for UI feedback, silently disabled with no audio device
 - `aircanvas/ui/toolbar.py` — the touchless toolbar (unchanged since Phase 4)
-- `aircanvas/app.py` — the pygame app: toolbar, camera preview, canvas,
-  replay overlay, status bar, save/export/recovery wiring
-- `aircanvas/{rendering/renderer.py,rendering/hud.py,rendering/themes.py,audio,persistence/settings.py}` —
+- `aircanvas/app.py` — the pygame app: now theme-aware rendering, sound
+  cues at the right moments, mirror/particle toggles, and settings
+  load/save wired into startup and shutdown
+- `aircanvas/{rendering/renderer.py,rendering/hud.py,rendering/typography.py}` —
   empty scaffolding for later phases (see Roadmap below)
-- `aircanvas/tests/` — 221 unit tests, all hardware/network-free
+- `aircanvas/tests/` — 253 unit tests, all hardware/network-free
 
 ## A note on MediaPipe versions
 
@@ -175,6 +171,30 @@ than ending) while you're over the toolbar and could, if you linger,
 trigger a button underneath it — this is worth smoothing out in a later
 polish pass, but doesn't affect normal use.
 
+### Themes, sound, and persistence
+
+- **T** — cycle theme: Dark (default) → Light → Neon → Monochrome → Dark.
+  Themes recolor the toolbar, panels, status bar, and borders — they never
+  touch the canvas background, since that's part of the artwork, not a
+  display preference
+- **N** — mute/unmute · **-** / **=** — volume down/up
+- **M** — toggle the camera mirror
+- **P** — toggle Living Ink particles *and* the toolbar's hover-glow
+  effect together, as a combined "reduced effects" switch for lower-end
+  machines or anyone who'd rather the UI stay calmer
+
+Every one of these — plus your current brush, color, size, and mirror
+setting — is saved to `~/.aircanvas/settings.json` on exit and restored
+automatically the next time you launch. A missing or corrupted settings
+file just falls back to defaults rather than crashing startup.
+
+**Sound** is a handful of short, procedurally-generated tones (no bundled
+audio files) confirming brush activation, color/tool/size selection,
+erase, undo/redo, clear, export, and replay start — nothing loops or
+plays continuously while you draw. If your machine has no usable audio
+device, `AudioManager` detects that at startup and every sound call
+becomes a silent no-op; nothing else about the app is affected.
+
 ## Running tests
 
 ```bash
@@ -185,12 +205,12 @@ pytest aircanvas/tests -v
 Tests are hardware-free: the camera tests mock `cv2.VideoCapture`, the
 tracker tests exercise data structures and model-caching logic without
 loading a real model, the feature/gesture/smoothing/calibration/state-
-machine/intent/dev-input/toolbar/replay tests run against synthetic data
-(`aircanvas/tests/helpers.py`), the particle/Living Ink tests use a seeded
-`random.Random` for reproducibility, the canvas + brush-style tests
-(`stroke`, `history`, `model`, `eraser`, `brush_engine`, `brush_styles`)
-run against a real but headless pygame `Surface`, and the project-save and
-share-card tests round-trip through real temp files on disk (`tmp_path`).
+machine/intent/dev-input/toolbar/replay/theme/settings tests run against
+synthetic data or real temp files (`tmp_path`), the particle/Living
+Ink/audio tests use a seeded `random.Random` (and, for audio, the SDL
+dummy driver) for reproducibility, and the canvas + brush-style tests run
+against a real but headless pygame `Surface` — no window or display
+needed anywhere.
 
 ## Roadmap
 
@@ -202,6 +222,7 @@ share-card tests round-trip through real temp files on disk (`tmp_path`).
 | 4 ✅ | Touchless tool/color/size controls |
 | 5 ✅ | Advanced brushes, particles, Living Ink, animation polish |
 | 6 ✅ | Project save/load, PNG export, replay, share card |
+| 7 ✅ | Themes, sound, accessibility, performance tuning |
 | 3 | Canvas model, stroke representation, basic brush, undo/redo |
 | 4 | Touchless tool/color/size controls |
 | 5 | Advanced brushes, particles, Living Ink, animation polish |

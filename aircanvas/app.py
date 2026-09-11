@@ -1,24 +1,30 @@
 """
-Phase 6 application shell.
+Phase 7 application shell.
 
-Adds project save/load, PNG export, a share card, and artwork replay
-on top of Phase 5's brushes/particles:
+Adds themes, sound, a couple of accessibility/performance levers, and
+persisted settings on top of Phase 6's save/export/replay:
 
-  * S saves the current canvas as a `.aircanvas` JSON project
-    (persistence/project_io.py); E exports a PNG and a composited
-    share card (persistence/share_card.py) alongside it.
-  * The app auto-saves a recovery copy periodically and reloads it on
-    the next launch if the previous session didn't exit cleanly --
-    "automatic recovery save where practical", per the project spec.
-  * R toggles Replay mode, which reconstructs the drawing stroke-by-
-    stroke (and point-by-point, where timing was recorded) using
-    canvas/replay.py's ReplayController, onto a separate surface that
-    never touches the live canvas -- exiting replay resumes editing
-    exactly where you left off.
+  * T cycles through four UI themes (dark/light/neon/monochrome --
+    rendering/themes.py). Themes only recolor chrome (panels, toolbar,
+    status bar, borders); they never touch canvas_model.background_color,
+    since that's part of the artwork's own data, not a display preference.
+  * Short, procedurally-generated tones (audio/manager.py) confirm
+    brush activation, color/tool/size selection, erase, undo/redo,
+    clear, export, and replay-start -- nothing loops or plays
+    continuously while drawing. N toggles mute; -/= adjust volume.
+    Gracefully silent with no audio device.
+  * M toggles the camera mirror; P doubles as a lightweight
+    "reduced effects" switch, now also damping the toolbar's hover
+    glow, not just Living Ink particles -- a real accessibility/
+    performance lever, not just a visual toggle, and one that only
+    ever touches presentation, never the strokes actually being
+    stored (so it has no bearing on redraw/replay fidelity).
+  * All of the above (plus the current brush/color/size) persist to
+    disk via persistence/settings.py and reload automatically next
+    launch.
 
-Touchless brushes/particles/toolbar are unchanged from Phase 5;
-save/export/replay controls are keyboard-driven utility actions, the
-same pattern as calibration's keyboard fallback in earlier phases.
+Save/export/replay, brushes, and toolbar mechanics are unchanged from
+Phases 4-6.
 """
 from __future__ import annotations
 
@@ -32,6 +38,7 @@ import cv2
 import numpy as np
 import pygame
 
+from aircanvas.audio.manager import AudioManager
 from aircanvas.canvas.brush_engine import BrushEngine
 from aircanvas.canvas.brushes import BrushType, SELECTABLE_BRUSHES
 from aircanvas.canvas.model import CanvasModel
@@ -41,9 +48,11 @@ from aircanvas.interaction.dev_input import DevIntentSource
 from aircanvas.interaction.intent import FrameIntent, IntentResolver
 from aircanvas.interaction.state_machine import IntentState, StateMachineConfig
 from aircanvas.persistence.project_io import ProjectLoadError, export_png, load_project, save_project
+from aircanvas.persistence.settings import AppSettings, load_settings, save_settings
 from aircanvas.persistence.share_card import build_share_card
 from aircanvas.rendering.effects import LivingInkEmitter
 from aircanvas.rendering.particles import ParticleSystem
+from aircanvas.rendering.themes import Theme, get_theme, next_theme_name
 from aircanvas.ui.toolbar import Toolbar, ToolbarResult, Widget
 from aircanvas.vision.calibration import Calibrator, MapperConfig
 from aircanvas.vision.camera import Camera, CameraError
@@ -52,16 +61,14 @@ from aircanvas.vision.tracker import HAND_CONNECTIONS, HandResult, HandTracker, 
 
 logger = logging.getLogger("aircanvas.app")
 
-WINDOW_TITLE = "AirCanvas — Phase 6"
+WINDOW_TITLE = "AirCanvas — Phase 7"
 PREVIEW_PANEL_WIDTH = 260
 TOOLBAR_WIDTH = 176
 MARGIN = 14
 PADDING = 10
 STATUS_BAR_HEIGHT = 30
 REPLAY_BAR_HEIGHT = 8
-PANEL_BG = (10, 10, 13)
-TOOLBAR_BG = (22, 22, 27)
-STATUS_TEXT_COLOR = (200, 200, 205)
+VOLUME_STEP = 0.1
 
 SWATCH_SIZE = 40
 SWATCH_GAP = 8
@@ -227,19 +234,30 @@ def _dispatch_toolbar_action(
     canvas_model: CanvasModel,
     brush_engine: BrushEngine,
     canvas_surface: "pygame.Surface",
+    audio: Optional[AudioManager] = None,
 ) -> None:
     if widget_id.startswith("color:"):
         selection.color_index = int(widget_id.split(":", 1)[1])
+        if audio:
+            audio.play("color_select")
     elif widget_id.startswith("size:"):
         selection.size_index = int(widget_id.split(":", 1)[1])
+        if audio:
+            audio.play("size_select")
     elif widget_id.startswith("brush:"):
         selection.brush_type_index = int(widget_id.split(":", 1)[1])
+        if audio:
+            audio.play("tool_select")
     elif widget_id == "undo":
         canvas_model.undo()
         brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+        if audio:
+            audio.play("undo")
     elif widget_id == "redo":
         canvas_model.redo()
         brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+        if audio:
+            audio.play("redo")
 
 
 # -- Canvas drawing -----------------------------------------------------------
@@ -263,6 +281,7 @@ def _continue_canvas_drawing(
     color: Tuple[int, int, int],
     size: float,
     brush_type: BrushType,
+    audio: Optional[AudioManager] = None,
 ) -> None:
     """Handles starting/extending a stroke. Only called when the
     cursor is over the canvas panel; `canvas_local_intent.cursor_pos`
@@ -271,6 +290,8 @@ def _continue_canvas_drawing(
     if intent.is_drawing:
         if intent.stroke_started:
             brush_engine.begin_stroke(canvas_surface, *intent.cursor_pos, color=color, size=size, brush_type=brush_type)
+            if audio:
+                audio.play("brush_activate")
         else:
             brush_engine.extend_stroke(canvas_surface, *intent.cursor_pos)
     elif intent.is_erasing:
@@ -279,6 +300,8 @@ def _continue_canvas_drawing(
                 canvas_surface, *intent.cursor_pos,
                 color=canvas_model.background_color, size=size, opacity=1.0, brush_type=BrushType.ERASER,
             )
+            if audio:
+                audio.play("erase")
         else:
             brush_engine.extend_stroke(canvas_surface, *intent.cursor_pos)
 
@@ -291,6 +314,7 @@ def _route_intent(
     canvas_model: CanvasModel,
     brush_engine: BrushEngine,
     canvas_surface: "pygame.Surface",
+    audio: Optional[AudioManager] = None,
 ) -> Optional[ToolbarResult]:
     """Every frame's single dispatch point: ends any finishing
     stroke, then sends the cursor to whichever panel it's over --
@@ -307,14 +331,15 @@ def _route_intent(
     if layout.toolbar_rect.collidepoint(pos):
         result = toolbar.update(pos, selecting=intent.is_drawing)
         if result.activated_id:
-            _dispatch_toolbar_action(result.activated_id, selection, canvas_model, brush_engine, canvas_surface)
+            _dispatch_toolbar_action(result.activated_id, selection, canvas_model, brush_engine, canvas_surface, audio)
         return result
 
     if layout.canvas_rect.collidepoint(pos):
         local = (pos[0] - layout.canvas_rect.x, pos[1] - layout.canvas_rect.y)
         local_intent = dataclasses.replace(intent, cursor_pos=local)
         _continue_canvas_drawing(
-            local_intent, brush_engine, canvas_model, canvas_surface, selection.color, selection.size, selection.brush_type
+            local_intent, brush_engine, canvas_model, canvas_surface,
+            selection.color, selection.size, selection.brush_type, audio,
         )
     return None
 
@@ -389,21 +414,26 @@ def _mouse_window_pos(layout: Layout) -> Tuple[int, int]:
 # -- Rendering ----------------------------------------------------------------
 
 def _draw_toolbar(
-    screen: "pygame.Surface", toolbar: Toolbar, hover: Optional[Tuple[Optional[str], float]], font: "pygame.font.Font"
+    screen: "pygame.Surface",
+    toolbar: Toolbar,
+    hover: Optional[Tuple[Optional[str], float]],
+    font: "pygame.font.Font",
+    theme: Theme,
+    effects_enabled: bool = True,
 ) -> None:
     hovered_id, hover_progress = hover if hover else (None, 0.0)
     for widget in toolbar.widgets:
         is_hovered = widget.id == hovered_id
         if widget.swatch_color is not None:
             pygame.draw.rect(screen, widget.swatch_color, widget.rect, border_radius=6)
-            border_color = (255, 255, 255) if widget.is_selected else (90, 90, 96)
+            border_color = theme.widget_border_selected if widget.is_selected else theme.widget_border
             pygame.draw.rect(screen, border_color, widget.rect, width=3 if widget.is_selected else 1, border_radius=6)
         else:
-            base = (60, 130, 90) if widget.is_selected else (46, 46, 52)
+            base = theme.widget_selected_bg if widget.is_selected else theme.widget_bg
             pygame.draw.rect(screen, base, widget.rect, border_radius=5)
-            pygame.draw.rect(screen, (110, 110, 118), widget.rect, width=1, border_radius=5)
+            pygame.draw.rect(screen, theme.widget_border, widget.rect, width=1, border_radius=5)
             if widget.label:
-                text = font.render(widget.label, True, (225, 225, 230))
+                text = font.render(widget.label, True, theme.widget_text)
                 text_rect = text.get_rect(center=widget.rect.center)
                 if text_rect.width > widget.rect.width - 4:
                     text = pygame.transform.smoothscale(
@@ -413,12 +443,13 @@ def _draw_toolbar(
                 screen.blit(text, text_rect)
 
         if is_hovered and hover_progress > 0.0:
-            fill_h = max(2, int(widget.rect.height * hover_progress))
-            fill_rect = pygame.Rect(widget.rect.x, widget.rect.bottom - fill_h, widget.rect.width, fill_h)
-            glow = pygame.Surface((fill_rect.width, fill_rect.height), pygame.SRCALPHA)
-            glow.fill((255, 255, 255, 90))
-            screen.blit(glow, fill_rect.topleft)
-            pygame.draw.rect(screen, (255, 255, 255), widget.rect, width=2, border_radius=5)
+            if effects_enabled:
+                fill_h = max(2, int(widget.rect.height * hover_progress))
+                fill_rect = pygame.Rect(widget.rect.x, widget.rect.bottom - fill_h, widget.rect.width, fill_h)
+                glow = pygame.Surface((fill_rect.width, fill_rect.height), pygame.SRCALPHA)
+                glow.fill((*theme.hover_glow, 90))
+                screen.blit(glow, fill_rect.topleft)
+            pygame.draw.rect(screen, theme.hover_glow, widget.rect, width=2, border_radius=5)
 
 
 def _update_living_ink(
@@ -485,7 +516,9 @@ def _save_project_with_timestamp(canvas_model: CanvasModel) -> None:
         print(f"\nCould not save project: {exc}\n")
 
 
-def _export_png_and_share_card(canvas_surface: "pygame.Surface", canvas_model: CanvasModel) -> None:
+def _export_png_and_share_card(
+    canvas_surface: "pygame.Surface", canvas_model: CanvasModel, audio: Optional[AudioManager] = None
+) -> None:
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     export_dir = get_exports_dir()
     png_path = export_dir / f"aircanvas_{timestamp}.png"
@@ -498,40 +531,44 @@ def _export_png_and_share_card(canvas_surface: "pygame.Surface", canvas_model: C
         )
         logger.info("Exported PNG to %s and share card to %s", png_path, card_path)
         print(f"\nExported: {png_path}\nShare card: {card_path}\n")
+        if audio:
+            audio.play("export_complete")
     except OSError as exc:
         logger.error("Could not export: %s", exc)
         print(f"\nCould not export: {exc}\n")
 
 
 def _draw_replay_overlay(
-    screen: "pygame.Surface", layout: Layout, controller: ReplayController, font: "pygame.font.Font"
+    screen: "pygame.Surface", layout: Layout, controller: ReplayController, font: "pygame.font.Font", theme: Theme
 ) -> None:
     bar_rect = pygame.Rect(
         layout.canvas_rect.x, layout.canvas_rect.bottom + 6, layout.canvas_rect.width, REPLAY_BAR_HEIGHT
     )
-    pygame.draw.rect(screen, (50, 50, 56), bar_rect, border_radius=4)
+    pygame.draw.rect(screen, theme.widget_bg, bar_rect, border_radius=4)
     fill_width = max(0, int(bar_rect.width * controller.progress))
     if fill_width > 0:
         fill_rect = pygame.Rect(bar_rect.x, bar_rect.y, fill_width, bar_rect.height)
-        pygame.draw.rect(screen, (90, 190, 255), fill_rect, border_radius=4)
+        pygame.draw.rect(screen, theme.accent_color, fill_rect, border_radius=4)
 
     state = "Playing" if controller.is_playing else "Paused"
     label = (
         f"REPLAY  |  {state}  |  Speed {controller.speed:.2g}x  |  {controller.progress * 100:.0f}%  |  "
         "Space play/pause \u00b7 \u2190/\u2192 seek \u00b7 \u2191/\u2193 speed \u00b7 Home restart \u00b7 R exit"
     )
-    text = font.render(label, True, (230, 235, 245))
+    text = font.render(label, True, theme.widget_text)
     label_bg = pygame.Rect(layout.canvas_rect.x, layout.canvas_rect.y, layout.canvas_rect.width, 26)
     overlay = pygame.Surface((label_bg.width, label_bg.height), pygame.SRCALPHA)
-    overlay.fill((10, 10, 14, 190))
+    overlay.fill((*theme.panel_bg, 190))
     screen.blit(overlay, label_bg.topleft)
     screen.blit(text, (label_bg.x + 8, label_bg.y + 5))
 
 
 def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = None) -> int:
-    """Run the Phase 6 app. Returns a process exit code."""
+    """Run the Phase 7 app. Returns a process exit code."""
     pygame.init()
     pygame.display.set_caption(WINDOW_TITLE)
+
+    settings = load_settings()
 
     camera: Optional[Camera] = None
     tracker: Optional[HandTracker] = None
@@ -542,7 +579,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
     if not mouse_mode:
         camera = Camera(
             index=config.camera_index, width=config.camera_width, height=config.camera_height,
-            fps=config.camera_fps, mirror=config.mirror,
+            fps=config.camera_fps, mirror=settings.mirror,
             open_retries=config.camera_open_retries, retry_delay_sec=config.camera_retry_delay_sec,
         )
         try:
@@ -591,7 +628,14 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
     canvas_surface = pygame.Surface((canvas_model.width, canvas_model.height))
     brush_engine = BrushEngine()
     brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+
     selection = _BrushSelection(config)
+    selection.color_index = min(settings.color_index, len(config.brush_palette) - 1)
+    selection.size_index = min(settings.size_index, len(config.brush_sizes) - 1)
+    selection.brush_type_index = min(settings.brush_type_index, len(SELECTABLE_BRUSHES) - 1)
+
+    theme = get_theme(settings.theme)
+    audio = AudioManager(master_volume=settings.master_volume, sfx_volume=settings.sfx_volume, muted=settings.muted)
 
     particles = ParticleSystem(max_particles=config.max_particles, rng=random.Random())
     living_ink = LivingInkEmitter(
@@ -600,7 +644,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
         velocity_to_rate_scale=config.living_ink_velocity_scale,
         idle_emit_rate=config.living_ink_idle_rate,
     )
-    particles_enabled = config.particles_enabled
+    particles_enabled = settings.particles_enabled
 
     replay_mode = False
     replay_controller: Optional[ReplayController] = None
@@ -631,6 +675,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                         replay_controller = ReplayController(list(canvas_model.strokes))
                         replay_controller.play()
                         replay_mode = True
+                        audio.play("replay_start")
                 elif replay_mode:
                     if event.key == pygame.K_SPACE:
                         replay_controller.toggle()
@@ -648,9 +693,11 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                 elif event.key == pygame.K_z:
                     canvas_model.undo()
                     brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+                    audio.play("undo")
                 elif event.key == pygame.K_x:
                     canvas_model.redo()
                     brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+                    audio.play("redo")
                 elif event.key == pygame.K_LEFTBRACKET:
                     selection.cycle_size(-1)
                 elif event.key == pygame.K_RIGHTBRACKET:
@@ -668,7 +715,17 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                 elif event.key == pygame.K_s:
                     _save_project_with_timestamp(canvas_model)
                 elif event.key == pygame.K_e:
-                    _export_png_and_share_card(canvas_surface, canvas_model)
+                    _export_png_and_share_card(canvas_surface, canvas_model, audio)
+                elif event.key == pygame.K_t:
+                    theme = get_theme(next_theme_name(theme.name))
+                elif event.key == pygame.K_m and camera is not None:
+                    camera.mirror = not camera.mirror
+                elif event.key == pygame.K_n:
+                    audio.toggle_mute()
+                elif event.key == pygame.K_EQUALS:
+                    audio.set_master_volume(audio.master_volume + VOLUME_STEP)
+                elif event.key == pygame.K_MINUS:
+                    audio.set_master_volume(audio.master_volume - VOLUME_STEP)
 
         hands: List[HandResult] = []
         frame = None
@@ -707,13 +764,14 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
         else:
             selection.sync_widget_selection(toolbar)
             toolbar_result = _route_intent(
-                intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface
+                intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface, audio
             )
             last_hover = (toolbar_result.hovered_id, toolbar_result.hover_progress) if toolbar_result else (None, 0.0)
 
             if intent.clear_confirmed:
                 if canvas_model.clear():
                     brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+                    audio.play("clear")
 
             if particles_enabled:
                 _update_living_ink(intent, living_ink, selection.color, selection.size, dt)
@@ -728,13 +786,13 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                     logger.warning("Recovery autosave failed: %s", exc)
 
         # -- Render --
-        screen.fill(PANEL_BG)
+        screen.fill(theme.panel_bg)
 
-        pygame.draw.rect(screen, TOOLBAR_BG, layout.toolbar_rect.inflate(PADDING, PADDING), border_radius=8)
-        _draw_toolbar(screen, toolbar, last_hover, widget_font)
+        pygame.draw.rect(screen, theme.toolbar_bg, layout.toolbar_rect.inflate(PADDING, PADDING), border_radius=8)
+        _draw_toolbar(screen, toolbar, last_hover, widget_font, theme, effects_enabled=particles_enabled)
 
         screen.blit(replay_surface if replay_mode else canvas_surface, layout.canvas_rect.topleft)
-        pygame.draw.rect(screen, (60, 60, 66), layout.canvas_rect, width=1)
+        pygame.draw.rect(screen, theme.border_color, layout.canvas_rect, width=1)
 
         if layout.preview_rect is not None and frame is not None:
             _draw_camera_overlay(frame, hands, intent, calibrator)
@@ -742,10 +800,10 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                 _frame_to_surface(frame), (layout.preview_rect.width, layout.preview_rect.height)
             )
             screen.blit(preview_surface, layout.preview_rect.topleft)
-            pygame.draw.rect(screen, (60, 60, 66), layout.preview_rect, width=1)
+            pygame.draw.rect(screen, theme.border_color, layout.preview_rect, width=1)
 
         if replay_mode:
-            _draw_replay_overlay(screen, layout, replay_controller, widget_font)
+            _draw_replay_overlay(screen, layout, replay_controller, widget_font, theme)
         else:
             if particles_enabled:
                 particles.render(screen)
@@ -754,20 +812,22 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                 radius = max(int(selection.size / 2), 3) if layout.canvas_rect.collidepoint(intent.cursor_pos) else 6
                 pygame.draw.circle(screen, ring_color, intent.cursor_pos, radius, 2)
 
-        pygame.draw.rect(screen, (16, 16, 20), layout.status_rect)
+        pygame.draw.rect(screen, theme.status_bg, layout.status_rect)
         fps = clock.get_fps()
         if replay_mode:
             status = f"REPLAY MODE  |  Press R to return to drawing  |  FPS {fps:.0f}"
         else:
+            mute_label = "muted" if audio.muted else f"{int(audio.master_volume * 100)}%"
             status = (
                 f"{'MOUSE' if mouse_mode else intent.state.value.upper()}  |  "
                 f"{_BRUSH_LABELS.get(selection.brush_type, selection.brush_type.value)} {int(selection.size)}px  |  "
                 f"Strokes {canvas_model.stroke_count}  |  "
                 f"Undo:{'Y' if canvas_model.can_undo else 'n'} Redo:{'Y' if canvas_model.can_redo else 'n'}  |  "
                 f"{'Particles:' + str(particles.count) if particles_enabled else 'Particles off'}  |  "
-                f"S save \u00b7 E export \u00b7 R replay  |  FPS {fps:.0f}"
+                f"{theme.name.capitalize()}  |  Vol {mute_label}  |  "
+                f"S save \u00b7 E export \u00b7 R replay \u00b7 T theme  |  FPS {fps:.0f}"
             )
-        screen.blit(font.render(status, True, STATUS_TEXT_COLOR), (layout.status_rect.x + 10, layout.status_rect.y + 6))
+        screen.blit(font.render(status, True, theme.status_text), (layout.status_rect.x + 10, layout.status_rect.y + 6))
 
         pygame.display.flip()
 
@@ -781,5 +841,18 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
             recovery_path.unlink()  # clean exit -- no need to offer recovery next launch
         except OSError:
             pass
+
+    save_settings(AppSettings(
+        theme=theme.name,
+        brush_type_index=selection.brush_type_index,
+        color_index=selection.color_index,
+        size_index=selection.size_index,
+        mirror=camera.mirror if camera is not None else settings.mirror,
+        particles_enabled=particles_enabled,
+        master_volume=audio.master_volume,
+        sfx_volume=audio.sfx_volume,
+        muted=audio.muted,
+    ))
+
     pygame.quit()
     return 0

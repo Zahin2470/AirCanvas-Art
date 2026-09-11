@@ -1,3 +1,5 @@
-"""Audio manager with graceful degradation (Phase 7). Empty scaffold
-for now.
+"""
+Audio manager: procedurally-generated UI feedback tones (see
+manager.py) with graceful degradation when no audio device is
+available.
 """
