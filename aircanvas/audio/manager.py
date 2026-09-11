@@ -85,10 +85,23 @@ class AudioManager:
 
     def _init_mixer(self) -> None:
         try:
-            if not pygame.mixer.get_init():
+            # pygame.init() (called once at app startup, for the
+            # display and other subsystems) may already have
+            # initialized the mixer with its own default channel
+            # count before this constructor ever runs -- adapt to
+            # whatever's actually active rather than assuming mono,
+            # or sound generation silently fails on a channel-count
+            # mismatch.
+            init_info = pygame.mixer.get_init()
+            if init_info is None:
                 pygame.mixer.init(frequency=SAMPLE_RATE, size=-16, channels=1, buffer=512)
+                init_info = pygame.mixer.get_init()
+            _, _, channels = init_info
+
             for name, wave in _default_waveforms().items():
                 samples = np.clip(wave * 32767, -32768, 32767).astype(np.int16)
+                if channels == 2:
+                    samples = np.column_stack([samples, samples])
                 self._sounds[name] = pygame.sndarray.make_sound(samples)
             self.available = True
         except Exception as exc:  # environment-dependent (no audio device, etc.)

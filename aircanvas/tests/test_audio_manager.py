@@ -118,3 +118,22 @@ def test_constructor_clamps_initial_volumes():
     manager = AudioManager(master_volume=3.0, sfx_volume=-1.0)
     assert manager.master_volume == 1.0
     assert manager.sfx_volume == 0.0
+
+
+def test_adapts_to_a_mixer_already_initialized_in_stereo():
+    # pygame.init() (called once at real app startup) can initialize
+    # the mixer in stereo before AudioManager ever runs -- this was a
+    # real bug found during Phase 8 smoke testing: sound generation
+    # silently failed (caught as "unavailable") on the channel-count
+    # mismatch. Regression test: force a stereo mixer first, then
+    # confirm AudioManager still comes up available and can play.
+    import pygame
+
+    pygame.mixer.quit()
+    pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+    try:
+        manager = AudioManager()
+        assert manager.available is True
+        manager.play("brush_activate")  # should not raise
+    finally:
+        pygame.mixer.quit()

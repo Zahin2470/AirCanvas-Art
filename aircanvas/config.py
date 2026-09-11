@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 APP_NAME = "AirCanvas"
-APP_VERSION = "0.1.0"  # Phase 1: skeleton, config, camera, tracker, tests
+APP_VERSION = "1.0.0"  # All 8 development phases complete
 
 
 def get_app_data_dir() -> Path:

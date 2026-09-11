@@ -1,30 +1,20 @@
 """
-Phase 7 application shell.
+Phase 8 application shell — the complete, demo-ready AirCanvas.
 
-Adds themes, sound, a couple of accessibility/performance levers, and
-persisted settings on top of Phase 6's save/export/replay:
+Everything from Phases 1-7 (tracking, gesture intent, brushes,
+particles/Living Ink, save/export/replay, themes/sound/persistence),
+plus:
 
-  * T cycles through four UI themes (dark/light/neon/monochrome --
-    rendering/themes.py). Themes only recolor chrome (panels, toolbar,
-    status bar, borders); they never touch canvas_model.background_color,
-    since that's part of the artwork's own data, not a display preference.
-  * Short, procedurally-generated tones (audio/manager.py) confirm
-    brush activation, color/tool/size selection, erase, undo/redo,
-    clear, export, and replay-start -- nothing loops or plays
-    continuously while drawing. N toggles mute; -/= adjust volume.
-    Gracefully silent with no audio device.
-  * M toggles the camera mirror; P doubles as a lightweight
-    "reduced effects" switch, now also damping the toolbar's hover
-    glow, not just Living Ink particles -- a real accessibility/
-    performance lever, not just a visual toggle, and one that only
-    ever touches presentation, never the strokes actually being
-    stored (so it has no bearing on redraw/replay fidelity).
-  * All of the above (plus the current brush/color/size) persist to
-    disk via persistence/settings.py and reload automatically next
-    launch.
-
-Save/export/replay, brushes, and toolbar mechanics are unchanged from
-Phases 4-6.
+  * H toggles an in-app help overlay -- a compact gesture and keyboard
+    cheat-sheet drawn right on the canvas panel, so a first-time user
+    (or someone recording a demo) never has to leave the app to learn
+    the controls. "Press H for help" is always visible in the status
+    bar as a standing hint. While help is open, Esc closes it instead
+    of quitting the app -- Q still quits from anywhere.
+  * The CLI now lives in aircanvas/cli.py, importable from main.py,
+    `python -m aircanvas`, and the `aircanvas` console script
+    installed via pyproject.toml, so all three launch paths share one
+    implementation.
 """
 from __future__ import annotations
 
@@ -61,7 +51,7 @@ from aircanvas.vision.tracker import HAND_CONNECTIONS, HandResult, HandTracker, 
 
 logger = logging.getLogger("aircanvas.app")
 
-WINDOW_TITLE = "AirCanvas — Phase 7"
+WINDOW_TITLE = "AirCanvas — Paint Without Touching Anything"
 PREVIEW_PANEL_WIDTH = 260
 TOOLBAR_WIDTH = 176
 MARGIN = 14
@@ -538,6 +528,34 @@ def _export_png_and_share_card(
         print(f"\nCould not export: {exc}\n")
 
 
+HELP_LINES = [
+    "GESTURES",
+    "  Point (index only) - move cursor      Pinch - draw / select toolbar",
+    "  Two-finger (index+middle) - erase      Open palm - pause",
+    "  Fist, held ~2/3s - clear canvas",
+    "",
+    "KEYBOARD",
+    "  Z undo   X redo   [ ] size   Tab color   B brush style",
+    "  S save   E export + share card   R replay   1/2/C calibrate",
+    "  T theme   N mute   -/= volume   M mirror   P reduced effects",
+    "  Q/Esc quit   H toggle this help",
+]
+
+
+def _draw_help_overlay(screen: "pygame.Surface", layout: Layout, font: "pygame.font.Font", theme: Theme) -> None:
+    box = layout.canvas_rect.inflate(-40, -40)
+    overlay = pygame.Surface((box.width, box.height), pygame.SRCALPHA)
+    overlay.fill((*theme.panel_bg, 225))
+    screen.blit(overlay, box.topleft)
+    pygame.draw.rect(screen, theme.accent_color, box, width=2, border_radius=10)
+
+    y = box.y + 24
+    for line in HELP_LINES:
+        color = theme.accent_color if line and not line.startswith(" ") else theme.widget_text
+        screen.blit(font.render(line, True, color), (box.x + 30, y))
+        y += 24
+
+
 def _draw_replay_overlay(
     screen: "pygame.Surface", layout: Layout, controller: ReplayController, font: "pygame.font.Font", theme: Theme
 ) -> None:
@@ -647,6 +665,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
     particles_enabled = settings.particles_enabled
 
     replay_mode = False
+    help_visible = False
     replay_controller: Optional[ReplayController] = None
     replay_surface = pygame.Surface((canvas_model.width, canvas_model.height))
 
@@ -657,7 +676,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
     running = True
     last_hover: Tuple[Optional[str], float] = (None, 0.0)
 
-    logger.info("AirCanvas Phase 6 running (%s mode). Press Q to quit.", "mouse" if mouse_mode else "camera")
+    logger.info("AirCanvas running (%s mode). Press Q to quit, H for help.", "mouse" if mouse_mode else "camera")
 
     while running:
         dt = clock.tick(60) / 1000.0
@@ -666,7 +685,14 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key in (pygame.K_q, pygame.K_ESCAPE):
+                if event.key == pygame.K_h:
+                    help_visible = not help_visible
+                elif help_visible:
+                    if event.key in (pygame.K_ESCAPE, pygame.K_q):
+                        help_visible = False
+                    # Help is a read-only overlay -- every other key is
+                    # ignored while it's open, so nothing fires twice.
+                elif event.key in (pygame.K_q, pygame.K_ESCAPE):
                     running = False
                 elif event.key == pygame.K_r:
                     if replay_mode:
@@ -761,6 +787,8 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
             replay_controller.advance(dt)
             replay_controller.render(replay_surface, brush_engine, canvas_model.background_color)
             last_hover = (None, 0.0)
+        elif help_visible:
+            last_hover = (None, 0.0)
         else:
             selection.sync_widget_selection(toolbar)
             toolbar_result = _route_intent(
@@ -812,9 +840,14 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                 radius = max(int(selection.size / 2), 3) if layout.canvas_rect.collidepoint(intent.cursor_pos) else 6
                 pygame.draw.circle(screen, ring_color, intent.cursor_pos, radius, 2)
 
+        if help_visible:
+            _draw_help_overlay(screen, layout, widget_font, theme)
+
         pygame.draw.rect(screen, theme.status_bg, layout.status_rect)
         fps = clock.get_fps()
-        if replay_mode:
+        if help_visible:
+            status = "HELP  |  Press H or Esc to close"
+        elif replay_mode:
             status = f"REPLAY MODE  |  Press R to return to drawing  |  FPS {fps:.0f}"
         else:
             mute_label = "muted" if audio.muted else f"{int(audio.master_volume * 100)}%"
@@ -824,8 +857,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                 f"Strokes {canvas_model.stroke_count}  |  "
                 f"Undo:{'Y' if canvas_model.can_undo else 'n'} Redo:{'Y' if canvas_model.can_redo else 'n'}  |  "
                 f"{'Particles:' + str(particles.count) if particles_enabled else 'Particles off'}  |  "
-                f"{theme.name.capitalize()}  |  Vol {mute_label}  |  "
-                f"S save \u00b7 E export \u00b7 R replay \u00b7 T theme  |  FPS {fps:.0f}"
+                f"{theme.name.capitalize()}  |  Vol {mute_label}  |  Press H for help  |  FPS {fps:.0f}"
             )
         screen.blit(font.render(status, True, theme.status_text), (layout.status_rect.x + 10, layout.status_rect.y + 6))
 
