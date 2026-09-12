@@ -87,6 +87,12 @@ class LivingInkEmitter:
         self._burst(x, y, color, size, count=8, speed=12.0, lifetime=0.9)
         self.reset()
 
+    def burst_at(self, x: float, y: float, color: Color, size: float, count: int = 10, speed: float = 30.0, lifetime: float = 0.8) -> None:
+        """A one-off celebratory burst, independent of any stroke in
+        progress -- e.g. shape assist confirming it recognized and
+        corrected a shape. Doesn't touch stroke-tracking state."""
+        self._burst(x, y, color, size, count=count, speed=speed, lifetime=lifetime)
+
     # -- internals --------------------------------------------------
 
     def _emit_at_rate(self, x: float, y: float, color: Color, size: float, rate: float, dt: float) -> None:

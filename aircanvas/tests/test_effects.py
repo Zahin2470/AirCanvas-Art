@@ -74,3 +74,9 @@ def test_stroke_end_implicitly_resets_direction_tracking():
     before = system.count
     emitter.on_stroke_point(10, -10, (255, 0, 0), size=10, velocity=0.0, dt=0.0)
     assert system.count == before
+
+
+def test_burst_at_spawns_particles_independent_of_stroke_state():
+    emitter, system = _emitter(base_emit_rate=0.0)
+    emitter.burst_at(5, 5, (0, 255, 0), size=10, count=7)
+    assert system.count == 7

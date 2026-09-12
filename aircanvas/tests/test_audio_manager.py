@@ -56,7 +56,7 @@ def test_default_waveforms_cover_all_expected_events():
     waveforms = _default_waveforms()
     expected = {
         "brush_activate", "color_select", "tool_select", "size_select", "erase",
-        "undo", "redo", "clear", "export_complete", "replay_start",
+        "undo", "redo", "clear", "export_complete", "replay_start", "shape_snap",
     }
     assert set(waveforms.keys()) == expected
 

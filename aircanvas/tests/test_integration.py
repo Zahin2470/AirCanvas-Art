@@ -14,6 +14,7 @@ tmp_path), so these tests never read or write the real user's
 from __future__ import annotations
 
 import os
+import random
 
 os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -175,6 +176,64 @@ def test_touchless_toolbar_dwell_selects_brush_and_size():
         app._route_intent(intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface)
 
     assert selection.brush_type == BrushType.NEON_GLOW
+
+
+def test_shape_assist_snaps_a_rough_rectangle_drawn_through_real_app_code():
+    pygame.display.set_mode((10, 10))
+    config = load_config({})
+    layout = app.Layout(config, show_preview=False)
+    toolbar = app._build_toolbar(layout, config)
+    selection = app._BrushSelection(config)
+    canvas_model = CanvasModel(
+        width=config.canvas_pixel_width, height=config.canvas_pixel_height,
+        background_color=config.canvas_background_color,
+    )
+    canvas_surface = pygame.Surface((canvas_model.width, canvas_model.height))
+    brush_engine = BrushEngine()
+    brush_engine.render_full(canvas_surface, canvas_model.strokes, canvas_model.background_color)
+    source = DevIntentSource(StateMachineConfig(debounce_frames=1))
+
+    # Walk a rough, slightly-jittered rectangle outline, drawn as one
+    # continuous pinch-held stroke -- the same shape as a real hand's
+    # imperfect attempt at a rectangle.
+    rng = random.Random(11)
+    origin = (layout.canvas_rect.x + 100, layout.canvas_rect.y + 100)
+    corners = [(0, 0), (200, 0), (200, 150), (0, 150), (0, 0)]
+    rough_points = []
+    for a, b in zip(corners, corners[1:]):
+        for i in range(10):
+            t = i / 10
+            x = origin[0] + a[0] + (b[0] - a[0]) * t + rng.uniform(-2, 2)
+            y = origin[1] + a[1] + (b[1] - a[1]) * t + rng.uniform(-2, 2)
+            rough_points.append((x, y))
+
+    shape_match = None
+    for point in rough_points:
+        intent = source.update(point, left_button=True, right_button=False, fist_key=False)
+        _, match = app._route_intent(
+            intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface,
+            shape_assist_enabled=True, shape_assist_min_points=8,
+        )
+        shape_match = shape_match or match
+    intent = source.update(rough_points[-1], left_button=False, right_button=False, fist_key=False)
+    _, match = app._route_intent(
+        intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface,
+        shape_assist_enabled=True, shape_assist_min_points=8,
+    )
+    shape_match = shape_match or match
+
+    assert shape_match is not None
+    assert canvas_model.stroke_count == 1
+    snapped_stroke = canvas_model.strokes[0]
+    # The idealized rectangle has exactly 5 points (4 corners + close);
+    # the rough hand-drawn version had ~40.
+    assert len(snapped_stroke.points) < len(rough_points) / 2
+
+
+def test_shape_assist_off_by_default_leaves_rough_strokes_alone():
+    pygame.display.set_mode((10, 10))
+    config = load_config({})
+    assert config.shape_assist_enabled is False
 
 
 # -- Settings persistence across a simulated relaunch ----------------------

@@ -67,6 +67,7 @@ def _default_waveforms() -> Dict[str, np.ndarray]:
         "clear": _tone(200, 0.15, 0.35, sweep_to=100),
         "export_complete": _two_tone(660, 990, 0.16, 0.40),
         "replay_start": _tone(300, 0.25, 0.35, sweep_to=700),
+        "shape_snap": _two_tone(520, 780, 0.12, 0.40),
     }
 
 

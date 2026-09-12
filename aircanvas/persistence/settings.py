@@ -38,6 +38,7 @@ class AppSettings:
     master_volume: float = 0.7
     sfx_volume: float = 0.8
     muted: bool = False
+    shape_assist_enabled: bool = False
 
     def clamped(self) -> "AppSettings":
         """A copy with numeric fields clamped to safe ranges -- used
@@ -53,6 +54,7 @@ class AppSettings:
             master_volume=min(max(float(self.master_volume), 0.0), 1.0),
             sfx_volume=min(max(float(self.sfx_volume), 0.0), 1.0),
             muted=bool(self.muted),
+            shape_assist_enabled=bool(self.shape_assist_enabled),
         )
 
 

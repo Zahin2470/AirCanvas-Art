@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 APP_NAME = "AirCanvas"
-APP_VERSION = "1.0.0"  # All 8 development phases complete
+APP_VERSION = "1.1.0"  # v1.0.0 = all 8 phases complete; v1.1.0 adds opt-in shape assist
 
 
 def get_app_data_dir() -> Path:
@@ -113,6 +113,13 @@ class AppConfig:
 
     # -- Save/export/recovery (see persistence/project_io.py) --
     recovery_autosave_interval_sec: float = 15.0
+
+    # -- Shape assist (see canvas/shape_assist.py) --
+    # Off by default: it's a deliberate, opt-in correction, not a
+    # silent one -- see the module docstring on what it can and can't
+    # actually tell apart.
+    shape_assist_enabled: bool = False
+    shape_assist_min_points: int = 8
 
     # -- Pointer smoothing (see vision/smoothing.py) --
     smoothing_min_alpha: float = 0.15

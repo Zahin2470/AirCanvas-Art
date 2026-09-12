@@ -24,7 +24,7 @@ system, project save/load, PNG export, a shareable preview card, artwork
 replay, four visual themes, procedural sound, and persisted preferences —
 built in eight phases, all of which are done.
 
-**269 tests. Zero hardware dependencies to run them. Runs with or without
+**290 tests. Zero hardware dependencies to run them. Runs with or without
 a webcam** (see [Developer mode](#developer-mode-no-camera-needed)).
 
 
@@ -38,6 +38,7 @@ a webcam** (see [Developer mode](#developer-mode-no-camera-needed)).
 - **Stroke-level undo/redo** — one undo = one stroke or one clear, standard redo invalidation
 - **A real eraser** — modeled as a stroke painted in the background color, so it gets undo/redo and replay for free, and never destroys ink drawn after it
 - **Living Ink** — a bounded, deterministic particle system: fading motes trail your cursor and your strokes, burst on a sharp turn, and settle when a stroke starts or ends
+- **Shape assist** (off by default) — a geometric classifier that snaps a rough sketch to a clean line, triangle, rectangle, ellipse, star, or book-aspect template — see [Shape assist](#shape-assist) for exactly what this can and can't tell apart
 - **Project save/load** — plain JSON (`.aircanvas`), never pickle, atomic writes, corruption-safe loading
 - **PNG export + a shareable preview card** — artwork, title, stroke count, and date composited together
 - **Artwork replay** — watch a drawing reconstruct itself stroke-by-stroke and point-by-point, with play/pause/seek/speed
@@ -87,11 +88,14 @@ keyboard-driven):
 | **N** | mute · **-** / **=** volume down/up |
 | **M** | toggle camera mirror |
 | **P** | toggle Living Ink + toolbar hover-glow (reduced effects) |
+| **K** | toggle shape assist (off by default) |
+
 
 ## Installation
 
 ```bash
-python3 -m venv .venv   #macOS/Linux
+python3 -m venv .venv
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
@@ -208,6 +212,43 @@ This is a purely decorative, real-time overlay: it never touches the
 saved stroke data, so it has zero bearing on undo/redo or replay
 correctness — only the deterministic brush rendering above does. Toggle
 it (along with the toolbar's hover-glow) anytime with **P**.
+
+## Shape assist
+
+**K** toggles Shape Assist (`aircanvas/canvas/shape_assist.py`), **off by
+default**. When it's on, finishing a drawn stroke (not an erase) runs it
+through a geometric classifier; if your rough sketch confidently matches
+a supported shape, AirCanvas replaces it with a clean version in the same
+color, size, and brush style — with a chime, a small particle burst, and
+a status-bar toast telling you what it snapped to.
+
+**What it actually recognizes — read this before expecting it to know
+what a book is:** this is geometry, not object recognition. It can tell
+a five-pointed star from a rectangle, because those are genuinely
+different shapes. It cannot tell a book from a rectangle, because a book
+drawn as a rectangle *is* a rectangle — there's no shape-only signal that
+tells them apart. "Book" here means *a closed four-cornered shape whose
+proportions fall in a book-like band* (`BOOK_ASPECT_RATIO_RANGE` in
+`shape_assist.py`); a rectangle just outside that band snaps to a plain
+Rectangle instead. That's a deliberate, explainable heuristic matching
+what was asked for — an aspect-ratio-triggered template — not a claim
+that AirCanvas understands what a book is.
+
+Supported shapes: **Line** (straight open strokes), **Triangle**,
+**Rectangle**, **Book** (a rectangle in the book-aspect band, with an
+added spine line), **Ellipse/circle**, and **5-to-7-pointed Star**. A
+stroke that doesn't confidently match anything — including genuine
+freeform art — is left exactly as drawn; the classifier is intentionally
+conservative rather than eager, so it doesn't turn every imperfect circle
+into a jarring correction.
+
+Only the stroke's *points* are replaced — color, size, opacity, and
+brush style carry over unchanged, so a shape drawn with Rainbow Flow
+snaps to a clean Rainbow Flow shape, not a plain one. And like Living
+Ink, this only ever touches presentation at the moment of correction: the
+replacement is a real, ordinary `Stroke`, so once it lands it undoes,
+redoes, saves, and replays exactly like anything else you draw — there's
+no separate "shape object" concept.
 
 ## Themes, sound, and persistence
 
@@ -353,11 +394,11 @@ pip install pytest
 pytest aircanvas/tests -v
 ```
 
-269 tests, all hardware/network-free:
+290 tests, all hardware/network-free:
 
 - camera tests mock `cv2.VideoCapture`
 - tracker tests exercise data structures and model-caching logic without loading a real model
-- feature/gesture/smoothing/calibration/state-machine/intent/dev-input/toolbar/replay/theme/settings tests run against synthetic data or real temp files (`tmp_path`)
+- feature/gesture/smoothing/calibration/state-machine/intent/dev-input/toolbar/replay/theme/settings/shape-assist tests run against synthetic data or real temp files (`tmp_path`)
 - particle/Living-Ink/audio tests use a seeded `random.Random` (and, for audio, the SDL dummy driver) for reproducibility
 - canvas + brush-style tests run against a real but headless pygame `Surface`
 - `test_integration.py` runs the actual `aircanvas.app.run()` loop headlessly (SDL dummy video/audio drivers, an isolated `AIRCANVAS_HOME` per test) to verify the whole app boots, falls back to mouse mode, loads projects, recovers from a simulated crash, and exits cleanly — end to end, not just its parts in isolation
@@ -367,7 +408,7 @@ No window, display, camera, or microphone needed anywhere in the suite.
 ## Project structure
 
 ```
-aircanvas/
+aircanvas/                     (repo root)
 ├── main.py                    # CLI entry point (thin shim over aircanvas/cli.py)
 ├── pyproject.toml             # packaging: pip install -e ., `aircanvas` console script
 ├── requirements.txt
@@ -378,39 +419,40 @@ aircanvas/
     ├── app.py                 # the pygame app: layout, routing, main loop
     ├── config.py              # runtime configuration + app-data paths
     ├── vision/                # camera → landmarks → features → gesture (per-frame, stateless-ish)
-    │   ├── camera.py          # webcam capture, graceful failure handling
-    │   ├── tracker.py         # MediaPipe HandLandmarker wrapper
-    │   ├── features.py        # fingertip/pinch-distance/finger-extension signals
-    │   ├── gestures.py        # one frame's features -> one Gesture label
-    │   ├── smoothing.py       # velocity-adaptive EMA + jitter deadband
-    │   └── calibration.py     # camera-space -> canvas-space mapping
+    │   ├── camera.py          #   webcam capture, graceful failure handling
+    │   ├── tracker.py         #   MediaPipe HandLandmarker wrapper
+    │   ├── features.py        #   fingertip/pinch-distance/finger-extension signals
+    │   ├── gestures.py        #   one frame's features -> one Gesture label
+    │   ├── smoothing.py       #   velocity-adaptive EMA + jitter deadband
+    │   └── calibration.py     #   camera-space -> canvas-space mapping
     ├── interaction/           # gesture -> stable, debounced application intent
-    │   ├── state_machine.py   # hysteresis/debounce over raw per-frame gestures
-    │   ├── intent.py          # IntentResolver: ties vision + state machine + smoothing together
-    │   └── dev_input.py       # mouse/keyboard stand-in for a real hand (testing only)
+    │   ├── state_machine.py   #   hysteresis/debounce over raw per-frame gestures
+    │   ├── intent.py          #   IntentResolver: ties vision + state machine + smoothing together
+    │   └── dev_input.py       #   mouse/keyboard stand-in for a real hand (testing only)
     ├── canvas/                # the document: strokes, brushes, undo/redo, replay
-    │   ├── stroke.py          # Stroke: points, point_times, color, size, opacity, brush_type
-    │   ├── brushes.py         # BrushType catalog
-    │   ├── brush_engine.py    # stamps strokes onto a pygame surface, per-brush-type + deterministic
-    │   ├── eraser.py          # eraser stroke factory + stamp geometry
-    │   ├── history.py         # generic undo/redo action stack
-    │   ├── model.py           # CanvasModel: strokes + undo/redo, no pixel data
-    │   └── replay.py          # ReplayController: reconstructs drawing over time
+    │   ├── stroke.py          #   Stroke: points, point_times, color, size, opacity, brush_type
+    │   ├── brushes.py         #   BrushType catalog
+    │   ├── brush_engine.py    #   stamps strokes onto a pygame surface, per-brush-type + deterministic
+    │   ├── eraser.py          #   eraser stroke factory + stamp geometry
+    │   ├── history.py         #   generic undo/redo action stack
+    │   ├── model.py           #   CanvasModel: strokes + undo/redo, no pixel data
+    │   ├── replay.py          #   ReplayController: reconstructs drawing over time
+    │   └── shape_assist.py    #   geometric shape/template recognition (off by default)
     ├── rendering/             # decorative/presentational layers (never touch stroke data)
-    │   ├── particles.py       # bounded, deterministic particle system
-    │   ├── effects.py         # LivingInkEmitter: the emission rules
-    │   └── themes.py          # dark/light/neon/monochrome UI chrome
+    │   ├── particles.py       #   bounded, deterministic particle system
+    │   ├── effects.py         #   LivingInkEmitter: the emission rules
+    │   └── themes.py          #   dark/light/neon/monochrome UI chrome
     ├── audio/
-    │   └── manager.py         # procedurally-generated UI tones, graceful degradation
+    │   └── manager.py         #   procedurally-generated UI tones, graceful degradation
     ├── persistence/
-    │   ├── project_io.py      # JSON .aircanvas save/load + PNG export
-    │   ├── share_card.py      # composited preview image
-    │   └── settings.py        # persisted user preferences
+    │   ├── project_io.py      #   JSON .aircanvas save/load + PNG export
+    │   ├── share_card.py      #   composited preview image
+    │   └── settings.py        #   persisted user preferences
     ├── ui/
-    │   └── toolbar.py         # touchless hover + pinch-dwell widget system
+    │   └── toolbar.py         #   touchless hover + pinch-dwell widget system
     ├── utils/
     │   └── logging_setup.py
-    └── tests/                 # 269 tests -- see "Running tests" above
+    └── tests/                 # 290 tests -- see "Running tests" above
 ```
 
 ## Tracking vs. smoothing vs. gesture intent vs. brush rendering
@@ -459,6 +501,11 @@ Built in eight phases, keeping the project runnable after every one:
 | 6 ✅ | Project save/load, PNG export, replay, share card |
 | 7 ✅ | Themes, sound, accessibility, performance tuning |
 | 8 ✅ | Testing, packaging, documentation, demo-ready UX |
+
+**Post-launch:** Shape assist (see above) was added after the initial
+8-phase build, in response to feedback that freehand tracking accuracy
+alone wasn't enough for precise shapes — it's an opt-in correction layer
+on top of the finished pipeline, not a phase-9 rewrite of anything.
 
 Known, deliberately-scoped rough edges (not oversights — each is called
 out inline above where it's relevant): dragging a stroke across the
