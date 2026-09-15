@@ -13,6 +13,7 @@ fully touchless calibration flow arrives with the Phase 4 UI.
 """
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -39,6 +40,12 @@ class CoordinateMapper:
     def resize(self, width: int, height: int) -> None:
         self.canvas_width = width
         self.canvas_height = height
+
+    def set_sensitivity(self, value: float) -> None:
+        """Replace just the sensitivity, keeping calibrated margins.
+        MapperConfig is frozen (immutable), so this rebuilds it rather
+        than mutating a field in place."""
+        self.config = dataclasses.replace(self.config, sensitivity=value)
 
     def map(self, norm_x: float, norm_y: float) -> Tuple[int, int]:
         c = self.config

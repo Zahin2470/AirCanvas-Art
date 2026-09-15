@@ -24,7 +24,7 @@ system, project save/load, PNG export, a shareable preview card, artwork
 replay, four visual themes, procedural sound, and persisted preferences —
 built in eight phases, all of which are done.
 
-**290 tests. Zero hardware dependencies to run them. Runs with or without
+**305 tests. Zero hardware dependencies to run them. Runs with or without
 a webcam** (see [Developer mode](#developer-mode-no-camera-needed)).
 
 
@@ -38,7 +38,8 @@ a webcam** (see [Developer mode](#developer-mode-no-camera-needed)).
 - **Stroke-level undo/redo** — one undo = one stroke or one clear, standard redo invalidation
 - **A real eraser** — modeled as a stroke painted in the background color, so it gets undo/redo and replay for free, and never destroys ink drawn after it
 - **Living Ink** — a bounded, deterministic particle system: fading motes trail your cursor and your strokes, burst on a sharp turn, and settle when a stroke starts or ends
-- **Shape assist** (off by default) — a geometric classifier that snaps a rough sketch to a clean line, triangle, rectangle, ellipse, star, or book-aspect template — see [Shape assist](#shape-assist) for exactly what this can and can't tell apart
+- **Shape assist** (off by default, fully automatic once on) — a geometric classifier that watches strokes live, shows a soft preview once a shape reads confidently and stably, and auto-converts on release — line, triangle, rectangle, ellipse, star, or book-aspect template — see [Shape assist](#shape-assist) for exactly what this can and can't tell apart
+- **Live pointer-sensitivity tuning** (**,** / **.**) — if hand movement maps to too much (or too little) cursor movement, adjust and it's remembered
 - **Project save/load** — plain JSON (`.aircanvas`), never pickle, atomic writes, corruption-safe loading
 - **PNG export + a shareable preview card** — artwork, title, stroke count, and date composited together
 - **Artwork replay** — watch a drawing reconstruct itself stroke-by-stroke and point-by-point, with play/pause/seek/speed
@@ -88,8 +89,8 @@ keyboard-driven):
 | **N** | mute · **-** / **=** volume down/up |
 | **M** | toggle camera mirror |
 | **P** | toggle Living Ink + toolbar hover-glow (reduced effects) |
-| **K** | toggle shape assist (off by default) |
-
+| **K** | toggle shape assist (off by default; fully automatic once on) |
+| **,** / **.** | pointer sensitivity down / up |
 
 ## Installation
 
@@ -178,6 +179,19 @@ by design — see the note in
 on why utility actions like this stay on the keyboard rather than
 competing with the drawing gesture vocabulary.
 
+### Pointer sensitivity — if the cursor feels too fast (or too slow)
+
+If a small hand movement sends the cursor flying across the canvas,
+lower the sensitivity with **,** (comma); if you need more reach for a
+given hand movement, raise it with **.** (period). This changes the
+*gain* around the center of your calibrated area — how much cursor
+movement one unit of hand movement produces — independent of the
+jitter-smoothing described below. The default (0.55) is deliberately
+conservative, favoring fine control over reach; your tuned value is
+saved and restored automatically. If the cursor still feels laggy or
+jittery rather than just fast, that's the smoothing, not the
+sensitivity — see [Troubleshooting](#troubleshooting).
+
 ## Brush styles
 
 Pick one from the toolbar's brush-type buttons (or cycle with **B**):
@@ -216,11 +230,27 @@ it (along with the toolbar's hover-glow) anytime with **P**.
 ## Shape assist
 
 **K** toggles Shape Assist (`aircanvas/canvas/shape_assist.py`), **off by
-default**. When it's on, finishing a drawn stroke (not an erase) runs it
-through a geometric classifier; if your rough sketch confidently matches
-a supported shape, AirCanvas replaces it with a clean version in the same
-color, size, and brush style — with a chime, a small particle burst, and
-a status-bar toast telling you what it snapped to.
+default**. Once it's on, everything else is automatic — there's no second
+key to press per shape. While you draw, AirCanvas classifies the
+in-progress stroke on every new point; once a candidate shape reads
+confidently *and* stays stable for several consecutive points (not just
+one lucky frame), a soft, breathing outline of the clean version appears
+right over your rough sketch — a quiet hint, not a popup. Release the
+pinch, and if the *finished* stroke still classifies with high confidence,
+it's replaced with the clean version in the same color, size, and brush
+style, with a chime, a small particle burst, and a status-bar toast
+telling you what it snapped to. If confidence never got high enough, your
+freehand stroke is left exactly as drawn — nothing is forced.
+
+**Confidence and stability, not just a yes/no match:** every classification
+carries a 0–1 confidence score (how closed the loop is, how clean the
+corners are, how round an ellipse is, how pronounced a star's points are),
+and the live preview additionally requires that score to hold for several
+consecutive points before it commits to showing anything
+(`shape_assist_min_stable_updates` in `config.py`, ~8 by default). That
+pairing is what keeps the preview from flickering between guesses mid-stroke
+— a partial rectangle reads as "Line" for its first edge, then settles once
+enough of the shape exists to tell.
 
 **What it actually recognizes — read this before expecting it to know
 what a book is:** this is geometry, not object recognition. It can tell
@@ -394,7 +424,7 @@ pip install pytest
 pytest aircanvas/tests -v
 ```
 
-290 tests, all hardware/network-free:
+305 tests, all hardware/network-free:
 
 - camera tests mock `cv2.VideoCapture`
 - tracker tests exercise data structures and model-caching logic without loading a real model
@@ -452,7 +482,7 @@ aircanvas/                     (repo root)
     │   └── toolbar.py         #   touchless hover + pinch-dwell widget system
     ├── utils/
     │   └── logging_setup.py
-    └── tests/                 # 290 tests -- see "Running tests" above
+    └── tests/                 # 305 tests -- see "Running tests" above
 ```
 
 ## Tracking vs. smoothing vs. gesture intent vs. brush rendering
@@ -503,9 +533,16 @@ Built in eight phases, keeping the project runnable after every one:
 | 8 ✅ | Testing, packaging, documentation, demo-ready UX |
 
 **Post-launch:** Shape assist (see above) was added after the initial
-8-phase build, in response to feedback that freehand tracking accuracy
-alone wasn't enough for precise shapes — it's an opt-in correction layer
-on top of the finished pipeline, not a phase-9 rewrite of anything.
+8-phase build (v1.1.0), in response to feedback that freehand tracking
+accuracy alone wasn't enough for precise shapes — it's an opt-in
+correction layer on top of the finished pipeline, not a phase-9 rewrite
+of anything. v1.2.0 followed up on two more pieces of direct feedback:
+live pointer-sensitivity tuning (the cursor was outrunning people's hand
+movements) and reworking shape assist from a stroke-end-only check into
+a fully automatic live pipeline — a stroke is classified as it's drawn,
+with confidence scoring and multi-point temporal stability behind both
+the live preview and the release-time conversion, so pressing K once is
+the only manual step involved.
 
 Known, deliberately-scoped rough edges (not oversights — each is called
 out inline above where it's relevant): dragging a stroke across the

@@ -39,6 +39,7 @@ class AppSettings:
     sfx_volume: float = 0.8
     muted: bool = False
     shape_assist_enabled: bool = False
+    pointer_sensitivity: float = 0.55
 
     def clamped(self) -> "AppSettings":
         """A copy with numeric fields clamped to safe ranges -- used
@@ -55,6 +56,7 @@ class AppSettings:
             sfx_volume=min(max(float(self.sfx_volume), 0.0), 1.0),
             muted=bool(self.muted),
             shape_assist_enabled=bool(self.shape_assist_enabled),
+            pointer_sensitivity=min(max(float(self.pointer_sensitivity), 0.1), 2.0),
         )
 
 

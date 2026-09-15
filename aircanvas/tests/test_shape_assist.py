@@ -123,6 +123,40 @@ def test_wide_ellipse_is_recognized():
     assert match.kind == ShapeKind.ELLIPSE
 
 
+def test_rectangle_with_a_noise_induced_spurious_vertex_still_classifies_correctly():
+    # Regression test: a real noisy hand-drawn rectangle sometimes
+    # simplifies to 5 corners instead of 4 (one small bump on an edge
+    # survives RDP as a spurious extra vertex). This used to fall
+    # through to the ellipse check and get misclassified as an
+    # Ellipse; _simplify_to_corners's escalation/pruning fallback
+    # should now recover the correct Book/Rectangle classification.
+    rng = random.Random(21)
+    origin = (250, 250)
+    corners = [(0, 0), (180, 0), (180, 130), (0, 130), (0, 0)]
+    points = []
+    for a, b in zip(corners, corners[1:]):
+        for i in range(14):
+            t = i / 14
+            x = origin[0] + a[0] + (b[0] - a[0]) * t + rng.uniform(-2, 2)
+            y = origin[1] + a[1] + (b[1] - a[1]) * t + rng.uniform(-2, 2)
+            points.append((x, y))
+    match = classify_stroke(points)
+    assert match is not None
+    assert match.kind in (ShapeKind.RECTANGLE, ShapeKind.BOOK)
+
+
+def test_ellipse_with_high_initial_corner_count_is_not_forced_into_a_polygon():
+    # A smooth curve's first-pass simplification has many corners by
+    # nature (it's approximating a curve, not converging on a true
+    # small corner count) -- the escalation/pruning fallback must not
+    # force this down to a rectangle just because it eventually could.
+    points = _jitter(_sample_ellipse(80, 40, 70, 30), amount=1.5, rng=random.Random(42))
+    match = classify_stroke(points)
+    assert match is not None
+    assert match.kind == ShapeKind.ELLIPSE
+    assert match.confidence > 0.7
+
+
 # -- Star -------------------------------------------------------------------
 
 def test_five_pointed_star_is_recognized():
@@ -197,3 +231,126 @@ def test_classify_is_deterministic():
     first = classify_stroke(points)
     second = classify_stroke(points)
     assert first == second
+
+
+# -- Confidence scoring -------------------------------------------------
+
+def test_confidence_is_in_valid_range_for_every_shape_kind():
+    cases = [
+        _jitter(_sample_line(0, 0, 200, 40), amount=1.5),
+        _jitter(_sample_polygon([(0, 0), (100, 0), (100, 90), (0, 90)]), amount=2.0),
+        _jitter(_sample_polygon([(0, 100), (50, 0), (100, 100)]), amount=2.0),
+        _jitter(_sample_ellipse(50, 50, 40, 40), amount=1.5),
+        _jitter(_sample_star(60, 60, outer_r=50, inner_r=20), amount=1.5),
+    ]
+    for points in cases:
+        match = classify_stroke(points)
+        assert match is not None
+        assert 0.0 <= match.confidence <= 1.0
+
+
+def test_cleaner_rectangle_has_higher_confidence_than_noisier_one():
+    corners = [(0, 0), (150, 0), (150, 100), (0, 100)]
+    clean = classify_stroke(_jitter(_sample_polygon(corners), amount=0.5, rng=random.Random(1)))
+    noisy = classify_stroke(_jitter(_sample_polygon(corners), amount=12.0, rng=random.Random(1)))
+    assert clean is not None
+    # The noisy version may still classify as a rectangle or may not
+    # match at all; either way, if it does match, it should be less
+    # confident than the clean version.
+    if noisy is not None and noisy.kind == clean.kind:
+        assert noisy.confidence < clean.confidence
+
+
+def test_cleaner_circle_has_higher_confidence_than_slightly_egg_shaped_one():
+    clean = classify_stroke(_jitter(_sample_ellipse(50, 50, 40, 40), amount=0.5, rng=random.Random(2)))
+    # Not a true ellipse -- one side bulges more than the other.
+    lumpy = [
+        (50 + (40 + (6 if math.cos(2 * math.pi * i / 40) > 0.3 else 0)) * math.cos(2 * math.pi * i / 40),
+         50 + 40 * math.sin(2 * math.pi * i / 40))
+        for i in range(41)
+    ]
+    lumpy_match = classify_stroke(_jitter(lumpy, amount=0.5, rng=random.Random(2)))
+    assert clean is not None
+    if lumpy_match is not None and lumpy_match.kind == ShapeKind.ELLIPSE:
+        assert lumpy_match.confidence < clean.confidence
+
+
+def test_try_snap_stroke_respects_min_confidence_threshold():
+    corners = [(0, 0), (150, 0), (150, 100), (0, 100)]
+    points = _jitter(_sample_polygon(corners), amount=0.5, rng=random.Random(1))
+    stroke = Stroke(points=points)
+    assert try_snap_stroke(stroke, min_confidence=0.0) is not None
+    assert try_snap_stroke(stroke, min_confidence=1.1) is None  # impossible threshold -> never snaps
+
+
+# -- LiveShapeAssistTracker -----------------------------------------------
+
+def test_tracker_confirms_nothing_before_min_stable_updates():
+    from aircanvas.canvas.shape_assist import LiveShapeAssistTracker
+
+    tracker = LiveShapeAssistTracker(min_confidence=0.0, min_stable_updates=5)
+    corners = [(0, 0), (100, 0), (100, 90), (0, 90)]
+    points = _jitter(_sample_polygon(corners), amount=1.0, rng=random.Random(3))
+    for _ in range(4):
+        result = tracker.update(points)
+    assert result is None  # only 4 updates so far, need 5
+
+
+def test_tracker_confirms_after_min_stable_updates_of_the_same_kind():
+    from aircanvas.canvas.shape_assist import LiveShapeAssistTracker
+
+    tracker = LiveShapeAssistTracker(min_confidence=0.0, min_stable_updates=5)
+    corners = [(0, 0), (100, 0), (100, 90), (0, 90)]
+    points = _jitter(_sample_polygon(corners), amount=1.0, rng=random.Random(3))
+    result = None
+    for _ in range(5):
+        result = tracker.update(points)
+    assert result is not None
+    assert result.kind == ShapeKind.RECTANGLE
+
+
+def test_tracker_resets_stability_when_the_kind_changes():
+    from aircanvas.canvas.shape_assist import LiveShapeAssistTracker
+
+    tracker = LiveShapeAssistTracker(min_confidence=0.0, min_stable_updates=3)
+    rect_points = _jitter(_sample_polygon([(0, 0), (100, 0), (100, 90), (0, 90)]), amount=1.0, rng=random.Random(4))
+    triangle_points = _jitter(_sample_polygon([(0, 100), (50, 0), (100, 100)]), amount=1.0, rng=random.Random(4))
+
+    tracker.update(rect_points)
+    tracker.update(rect_points)
+    switched = tracker.update(triangle_points)  # kind changes -> stability resets
+    assert switched is None
+
+
+def test_tracker_reports_none_when_confidence_drops_below_threshold():
+    from aircanvas.canvas.shape_assist import LiveShapeAssistTracker
+
+    tracker = LiveShapeAssistTracker(min_confidence=0.95, min_stable_updates=2)
+    rng = random.Random(9)
+    scribble = [(rng.uniform(0, 200), rng.uniform(0, 200)) for _ in range(30)]
+    result = tracker.update(scribble)
+    assert result is None
+
+
+def test_tracker_reset_clears_accumulated_stability():
+    from aircanvas.canvas.shape_assist import LiveShapeAssistTracker
+
+    tracker = LiveShapeAssistTracker(min_confidence=0.0, min_stable_updates=3)
+    points = _jitter(_sample_polygon([(0, 0), (100, 0), (100, 90), (0, 90)]), amount=1.0, rng=random.Random(5))
+    tracker.update(points)
+    tracker.update(points)
+    tracker.reset()
+    result = tracker.update(points)  # only 1 update since reset
+    assert result is None
+    assert tracker.confirmed is None
+
+
+def test_tracker_confirmed_property_matches_last_update_result():
+    from aircanvas.canvas.shape_assist import LiveShapeAssistTracker
+
+    tracker = LiveShapeAssistTracker(min_confidence=0.0, min_stable_updates=2)
+    points = _jitter(_sample_polygon([(0, 0), (100, 0), (100, 90), (0, 90)]), amount=1.0, rng=random.Random(6))
+    tracker.update(points)
+    result = tracker.update(points)
+    assert tracker.confirmed == result
+    assert tracker.confirmed is not None

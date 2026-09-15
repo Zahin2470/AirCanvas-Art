@@ -125,3 +125,15 @@ def test_reset_clears_smoothing_and_state():
     result = resolver.update([make_hand(extended={"index": True})], now=0.0)
     assert result.state == IntentState.POINTER_ACTIVE
     assert result.stroke_started is False
+
+
+def test_set_pointer_sensitivity_changes_mapping():
+    resolver = _resolver()
+    resolver.set_pointer_sensitivity(0.5)
+    assert resolver.pointer_sensitivity == 0.5
+    hand = make_hand(extended={"index": True})
+    result = resolver.update([hand], now=0.0)
+    # Same raw fingertip, but with lower sensitivity the cursor sits
+    # closer to canvas center than the zero-margin, full-sensitivity
+    # mapping used elsewhere in this file (470, 225).
+    assert result.cursor_pos != (470, 225)

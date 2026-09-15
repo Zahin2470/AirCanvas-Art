@@ -97,3 +97,22 @@ def test_calibrator_reset_clears_captured_points():
     assert not calibrator.is_complete
     assert not calibrator.has_top_left
     assert not calibrator.has_bottom_right
+
+
+def test_set_sensitivity_changes_mapping_without_touching_margins():
+    config = MapperConfig(margin_left=0.1, margin_right=0.1, margin_top=0.1, margin_bottom=0.1, sensitivity=1.0)
+    mapper = CoordinateMapper(1000, 500, config)
+    before = mapper.map(0.7, 0.5)
+    mapper.set_sensitivity(0.5)
+    after = mapper.map(0.7, 0.5)
+    assert after != before
+    assert mapper.config.margin_left == 0.1  # margins preserved
+
+
+def test_lower_sensitivity_dampens_movement_around_center():
+    mapper = CoordinateMapper(1000, 500, MapperConfig(margin_left=0, margin_right=0, margin_top=0, margin_bottom=0, sensitivity=1.0))
+    full_x, _ = mapper.map(0.6, 0.5)
+    mapper.set_sensitivity(0.5)
+    damped_x, _ = mapper.map(0.6, 0.5)
+    center = 500
+    assert abs(damped_x - center) < abs(full_x - center)

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 APP_NAME = "AirCanvas"
-APP_VERSION = "1.1.0"  # v1.0.0 = all 8 phases complete; v1.1.0 adds opt-in shape assist
+APP_VERSION = "1.2.0"  # v1.0.0 = 8 phases complete; v1.1.0 = shape assist; v1.2.0 = live pointer sensitivity + automatic live shape assist
 
 
 def get_app_data_dir() -> Path:
@@ -117,9 +117,12 @@ class AppConfig:
     # -- Shape assist (see canvas/shape_assist.py) --
     # Off by default: it's a deliberate, opt-in correction, not a
     # silent one -- see the module docstring on what it can and can't
-    # actually tell apart.
+    # actually tell apart. Once on, detection and the live preview run
+    # automatically while drawing -- no extra keypress needed per shape.
     shape_assist_enabled: bool = False
     shape_assist_min_points: int = 8
+    shape_assist_min_confidence: float = 0.62
+    shape_assist_min_stable_updates: int = 8
 
     # -- Pointer smoothing (see vision/smoothing.py) --
     smoothing_min_alpha: float = 0.15
@@ -130,7 +133,12 @@ class AppConfig:
 
     # -- Coordinate mapping (see vision/calibration.py) --
     canvas_margin: float = 0.08  # symmetric default; calibration overrides per-side
-    pointer_sensitivity: float = 1.0
+    # Gain around the center of the active region -- 1.0 = raw mapping,
+    # lower = a given hand movement produces a smaller cursor movement
+    # (easier fine control, at the cost of needing a bigger physical
+    # motion to reach the canvas edges). Live-adjustable with , / . --
+    # see app.py -- and persisted once tuned.
+    pointer_sensitivity: float = 0.55
 
     # -- Gesture / intent state machine (see interaction/state_machine.py) --
     pinch_threshold: float = 0.35

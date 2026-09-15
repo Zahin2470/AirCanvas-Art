@@ -67,6 +67,16 @@ class IntentResolver:
     def resize_canvas(self, width: int, height: int) -> None:
         self._mapper.resize(width, height)
 
+    @property
+    def pointer_sensitivity(self) -> float:
+        return self._mapper.config.sensitivity
+
+    def set_pointer_sensitivity(self, value: float) -> None:
+        """Live-tune how much cursor movement a given hand movement
+        produces (see vision/calibration.py's CoordinateMapper).
+        Keeps calibrated margins untouched."""
+        self._mapper.set_sensitivity(value)
+
     def apply_calibration(self, calibrator: Calibrator, sensitivity: Optional[float] = None) -> MapperConfig:
         """Recompute and apply the coordinate mapping from a completed
         Calibrator, keeping the current sensitivity unless overridden."""

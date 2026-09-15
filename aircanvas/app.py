@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
 import random
 import time
 from typing import List, Optional, Tuple
@@ -33,7 +34,7 @@ from aircanvas.canvas.brush_engine import BrushEngine
 from aircanvas.canvas.brushes import BrushType, SELECTABLE_BRUSHES
 from aircanvas.canvas.model import CanvasModel
 from aircanvas.canvas.replay import ReplayController
-from aircanvas.canvas.shape_assist import ShapeMatch, classify_stroke
+from aircanvas.canvas.shape_assist import LiveShapeAssistTracker, ShapeMatch, classify_stroke
 from aircanvas.canvas.stroke import Stroke
 from aircanvas.config import AppConfig, get_exports_dir, get_projects_dir, get_recovery_path
 from aircanvas.interaction.dev_input import DevIntentSource
@@ -61,6 +62,9 @@ PADDING = 10
 STATUS_BAR_HEIGHT = 30
 REPLAY_BAR_HEIGHT = 8
 VOLUME_STEP = 0.1
+POINTER_SENSITIVITY_STEP = 0.05
+POINTER_SENSITIVITY_MIN = 0.15
+POINTER_SENSITIVITY_MAX = 1.5
 
 SWATCH_SIZE = 40
 SWATCH_GAP = 8
@@ -261,6 +265,7 @@ def _finalize_pending_stroke(
     canvas_surface: "pygame.Surface",
     shape_assist_enabled: bool = False,
     shape_assist_min_points: int = 8,
+    shape_assist_min_confidence: float = 0.62,
 ) -> Optional[ShapeMatch]:
     """Ends whatever draw/erase stroke is in progress, if the gesture
     that started it just ended -- regardless of where the cursor
@@ -269,15 +274,18 @@ def _finalize_pending_stroke(
 
     When a DRAWING stroke ends (never an eraser stroke -- "correcting"
     an erase into a shape would make no sense) and shape assist is
-    enabled, tries to recognize it via canvas/shape_assist.py. If it
-    matches, the rough stroke is replaced with the idealized one
-    (same color/size/opacity/brush_type) and the canvas is fully
-    re-rendered -- needed because the rough version was already
-    painted onto canvas_surface incrementally while it was being
-    drawn, so a full render_full is the simplest correct way to
-    discard it in favor of the clean version. Returns the ShapeMatch
-    when a correction happened, so the caller can show feedback (a
-    sound, a particle burst, a status message) -- None otherwise.
+    enabled, tries to recognize it via canvas/shape_assist.py and only
+    converts when the match's confidence clears
+    `shape_assist_min_confidence` -- a low-confidence match is left as
+    the original freehand stroke, unchanged. On a confident match, the
+    rough stroke is replaced with the idealized one (same color/size/
+    opacity/brush_type) and the canvas is fully re-rendered -- needed
+    because the rough version was already painted onto canvas_surface
+    incrementally while it was being drawn, so a full render_full is
+    the simplest correct way to discard it in favor of the clean
+    version. Returns the ShapeMatch when a correction happened, so the
+    caller can show feedback (a sound, a particle burst, a status
+    message) -- None otherwise.
     """
     if not (intent.stroke_ended or intent.erase_ended):
         return None
@@ -288,7 +296,9 @@ def _finalize_pending_stroke(
 
     match = None
     if shape_assist_enabled and intent.stroke_ended:
-        match = classify_stroke(finished.points, min_points=shape_assist_min_points)
+        candidate = classify_stroke(finished.points, min_points=shape_assist_min_points)
+        if candidate is not None and candidate.confidence >= shape_assist_min_confidence:
+            match = candidate
 
     if match is not None:
         snapped = Stroke(
@@ -347,6 +357,7 @@ def _route_intent(
     audio: Optional[AudioManager] = None,
     shape_assist_enabled: bool = False,
     shape_assist_min_points: int = 8,
+    shape_assist_min_confidence: float = 0.62,
 ) -> Tuple[Optional[ToolbarResult], Optional[ShapeMatch]]:
     """Every frame's single dispatch point: ends any finishing
     stroke (applying shape assist if enabled), then sends the cursor
@@ -362,7 +373,8 @@ def _route_intent(
     particle burst, a status message).
     """
     shape_match = _finalize_pending_stroke(
-        intent, brush_engine, canvas_model, canvas_surface, shape_assist_enabled, shape_assist_min_points
+        intent, brush_engine, canvas_model, canvas_surface,
+        shape_assist_enabled, shape_assist_min_points, shape_assist_min_confidence,
     )
 
     pos = intent.cursor_pos
@@ -589,7 +601,8 @@ HELP_LINES = [
     "  Z undo   X redo   [ ] size   Tab color   B brush style",
     "  S save   E export + share card   R replay   1/2/C calibrate",
     "  T theme   N mute   -/= volume   M mirror   P reduced effects",
-    "  K shape assist (off by default)   Q/Esc quit   H toggle this help",
+    "  ,/. pointer sensitivity   K shape assist (auto, off by default)",
+    "  Q/Esc quit   H toggle this help",
 ]
 
 
@@ -605,6 +618,34 @@ def _draw_help_overlay(screen: "pygame.Surface", layout: Layout, font: "pygame.f
         color = theme.accent_color if line and not line.startswith(" ") else theme.widget_text
         screen.blit(font.render(line, True, color), (box.x + 30, y))
         y += 24
+
+
+def _draw_shape_preview(
+    screen: "pygame.Surface", layout: Layout, match: ShapeMatch, theme: Theme, pulse: float
+) -> None:
+    """A subtle, non-intrusive ghost outline of the shape a live,
+    stable candidate would snap to -- drawn on a small surface sized
+    to the shape's own bounding box (not the whole canvas) so this is
+    cheap to redraw every frame while it's showing. `pulse` (0..1)
+    gently breathes the outline's opacity rather than holding it at a
+    flat, static alpha -- no popups, no dialogs, just a quiet hint."""
+    xs = [p[0] for p in match.points]
+    ys = [p[1] for p in match.points]
+    pad = 12
+    min_x, max_x = min(xs) - pad, max(xs) + pad
+    min_y, max_y = min(ys) - pad, max(ys) + pad
+    width, height = max(1, int(max_x - min_x)), max(1, int(max_y - min_y))
+    if len(match.points) < 2:
+        return
+
+    ghost = pygame.Surface((width, height), pygame.SRCALPHA)
+    local_points = [(x - min_x, y - min_y) for x, y in match.points]
+    base_alpha = int(70 + 55 * pulse)
+    pygame.draw.lines(ghost, (*theme.accent_color, base_alpha), False, local_points, 5)
+    pygame.draw.lines(ghost, (*theme.accent_color, min(255, base_alpha + 70)), False, local_points, 2)
+
+    dest = (layout.canvas_rect.x + min_x, layout.canvas_rect.y + min_y)
+    screen.blit(ghost, dest)
 
 
 def _draw_replay_overlay(
@@ -688,6 +729,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
 
     if not mouse_mode:
         resolver = _build_resolver(config, layout.window_width, layout.window_height)
+        resolver.set_pointer_sensitivity(settings.pointer_sensitivity)
 
     screen = pygame.display.set_mode((layout.window_width, layout.window_height))
     font = pygame.font.SysFont("Menlo,Consolas,monospace", 16)
@@ -715,8 +757,14 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
     )
     particles_enabled = settings.particles_enabled
     shape_assist_enabled = settings.shape_assist_enabled
-    shape_toast_label: Optional[str] = None
-    shape_toast_timer = 0.0
+    status_toast_label: Optional[str] = None
+    status_toast_timer = 0.0
+    shape_tracker = LiveShapeAssistTracker(
+        min_confidence=config.shape_assist_min_confidence,
+        min_stable_updates=config.shape_assist_min_stable_updates,
+        min_points=config.shape_assist_min_points,
+    )
+    shape_preview_pulse_time = 0.0
 
     replay_mode = False
     help_visible = False
@@ -792,8 +840,8 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                         particles.clear()
                 elif event.key == pygame.K_k:
                     shape_assist_enabled = not shape_assist_enabled
-                    shape_toast_label = f"Shape assist {'on' if shape_assist_enabled else 'off'}"
-                    shape_toast_timer = 1.2
+                    status_toast_label = f"Shape assist {'on' if shape_assist_enabled else 'off'}"
+                    status_toast_timer = 1.2
                 elif event.key == pygame.K_c and resolver is not None:
                     calibrator.reset()
                 elif event.key == pygame.K_s:
@@ -810,6 +858,16 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                     audio.set_master_volume(audio.master_volume + VOLUME_STEP)
                 elif event.key == pygame.K_MINUS:
                     audio.set_master_volume(audio.master_volume - VOLUME_STEP)
+                elif event.key == pygame.K_COMMA and resolver is not None:
+                    new_sensitivity = max(POINTER_SENSITIVITY_MIN, resolver.pointer_sensitivity - POINTER_SENSITIVITY_STEP)
+                    resolver.set_pointer_sensitivity(new_sensitivity)
+                    status_toast_label = f"Pointer sensitivity: {new_sensitivity:.2f}"
+                    status_toast_timer = 1.2
+                elif event.key == pygame.K_PERIOD and resolver is not None:
+                    new_sensitivity = min(POINTER_SENSITIVITY_MAX, resolver.pointer_sensitivity + POINTER_SENSITIVITY_STEP)
+                    resolver.set_pointer_sensitivity(new_sensitivity)
+                    status_toast_label = f"Pointer sensitivity: {new_sensitivity:.2f}"
+                    status_toast_timer = 1.2
 
         hands: List[HandResult] = []
         frame = None
@@ -851,9 +909,18 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
             selection.sync_widget_selection(toolbar)
             toolbar_result, shape_match = _route_intent(
                 intent, layout, toolbar, selection, canvas_model, brush_engine, canvas_surface, audio,
-                shape_assist_enabled, config.shape_assist_min_points,
+                shape_assist_enabled, config.shape_assist_min_points, config.shape_assist_min_confidence,
             )
             last_hover = (toolbar_result.hovered_id, toolbar_result.hover_progress) if toolbar_result else (None, 0.0)
+
+            if shape_assist_enabled:
+                if intent.stroke_started:
+                    shape_tracker.reset()
+                if brush_engine.is_drawing:
+                    shape_tracker.update(brush_engine.active_stroke.points)
+                if intent.stroke_ended or intent.erase_ended:
+                    shape_tracker.reset()
+            shape_preview_pulse_time += dt
 
             if shape_match is not None:
                 audio.play("shape_snap")
@@ -863,13 +930,13 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
                     living_ink.burst_at(
                         layout.canvas_rect.x + cx, layout.canvas_rect.y + cy, selection.color, selection.size
                     )
-                shape_toast_label = f"\u2728 Snapped to {shape_match.label}"
-                shape_toast_timer = 1.6
+                status_toast_label = f"\u2728 Snapped to {shape_match.label}"
+                status_toast_timer = 1.6
 
-            if shape_toast_timer > 0.0:
-                shape_toast_timer -= dt
-                if shape_toast_timer <= 0.0:
-                    shape_toast_label = None
+            if status_toast_timer > 0.0:
+                status_toast_timer -= dt
+                if status_toast_timer <= 0.0:
+                    status_toast_label = None
 
             if intent.clear_confirmed:
                 if canvas_model.clear():
@@ -910,6 +977,9 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
         else:
             if particles_enabled:
                 particles.render(screen)
+            if shape_assist_enabled and shape_tracker.confirmed is not None:
+                pulse = 0.5 + 0.5 * math.sin(shape_preview_pulse_time * 4.0)
+                _draw_shape_preview(screen, layout, shape_tracker.confirmed, theme, pulse)
             if intent.cursor_pos is not None:
                 ring_color = _STATE_COLORS.get(intent.state, (255, 255, 255))
                 radius = max(int(selection.size / 2), 3) if layout.canvas_rect.collidepoint(intent.cursor_pos) else 6
@@ -924,8 +994,10 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
             status = "HELP  |  Press H or Esc to close"
         elif replay_mode:
             status = f"REPLAY MODE  |  Press R to return to drawing  |  FPS {fps:.0f}"
-        elif shape_toast_label is not None:
-            status = shape_toast_label
+        elif status_toast_label is not None:
+            status = status_toast_label
+        elif shape_assist_enabled and shape_tracker.confirmed is not None:
+            status = f"\u21dd {shape_tracker.confirmed.label}"
         else:
             mute_label = "muted" if audio.muted else f"{int(audio.master_volume * 100)}%"
             status = (
@@ -963,6 +1035,7 @@ def run(config: AppConfig, mouse_mode: bool = False, open_path: Optional[str] = 
         sfx_volume=audio.sfx_volume,
         muted=audio.muted,
         shape_assist_enabled=shape_assist_enabled,
+        pointer_sensitivity=resolver.pointer_sensitivity if resolver is not None else settings.pointer_sensitivity,
     ))
 
     pygame.quit()
